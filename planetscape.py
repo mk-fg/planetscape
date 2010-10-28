@@ -43,7 +43,7 @@ def ip_to_loc(ip, cur):
 	log.debug('Resolving IP: {0}'.format(ip))
 	ip = unpack(b'!i', inet_aton(ip))[0]
 	cur.execute( 'SELECT lat, lon FROM ip_blocks'
-		' WHERE ? > ip_min AND ? < ip_max LIMIT 1', (ip, ip) )
+		' WHERE ? >= ip_min AND ? <= ip_max LIMIT 1', (ip, ip) )
 	try: return next(iter(cur))
 	except StopIteration: raise UnknownLocation()
 
@@ -101,6 +101,7 @@ def build_geoip_db():
 	import csv
 	csv_blocks, csv_loc = it.imap(ft.partial( csv.reader,
 		delimiter=b',', quoting=csv.QUOTE_ALL ), (csv_blocks, csv_loc))
+
 	log.debug('Building sqlite geoip db cache')
 	link = sqlite3.connect(geoip_db_path)
 	cur = link.cursor()
@@ -225,15 +226,16 @@ if __name__ == '__main__':
 
 	geoip_db = sqlite3.connect(geoip_db_path)
 
-	trace_cmd = trace_cmd('8.8.8.8')
-	tracer = reactor.spawnProcess( trace_proto(),
-		trace_cmd[0], map(bytes, trace_cmd) ).sentinel = defer.Deferred()
-	tracer.addCallback(ips_to_locs)
-	tracer.addCallback(print)
-
 	def fail(err):
 		raise err
-	tracer.addErrback(fail)
+	def trace(ip):
+		trace = trace_cmd(ip)
+		tracer = reactor.spawnProcess( trace_proto(),
+			trace[0], map(bytes, trace) ).sentinel = defer.Deferred()
+		tracer.addCallback(ips_to_locs)
+		tracer.addCallback(print)
+		tracer.addErrback(fail)
+	reactor.callLater(0, trace, '8.8.8.8')
 
 	if not optz.oneshot:
 		# planescape = PlaneScape()
