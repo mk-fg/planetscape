@@ -108,22 +108,21 @@ def build_geoip_db():
 
 	log.debug('Initializing tables')
 	cur.execute( 'CREATE TABLE ip_blocks (ip_min INT NULL,'
-		' ip_max INT NULL, loc_id VARCHAR(15) NULL, lat FLOAT, lon FLOAT)' )
-	cur.execute('CREATE UNIQUE INDEX ip_loc ON ip_blocks (loc_id)')
+		' ip_max INT NULL, lat FLOAT, lon FLOAT)' )
+	loc_id = dict()
 
-	# This is slow, py-based loc_id -> lat/lan would
-	#  probably be faster, but it'd have to fit into RAM
+	# Building/querying same index in sqlite takes a lot more time,
+	#  downside is that py-based one would have to fit into RAM
 	log.debug('Building loc_id index')
-	for line in it.imap(csv_loc_key, csv_loc):
-		cur.execute('INSERT INTO ip_blocks (loc_id, lat, lon) VALUES (?, ?, ?)', line)
+	for line in it.imap(csv_loc_key, csv_loc): loc_id[line[0]] = line[1:]
 	log.debug('Filling lat/lon for ip ranges')
 	for line in it.imap(csv_blocks_key, csv_blocks):
-		cur.execute(
-			'INSERT INTO ip_blocks (ip_min, ip_max, lat, lon)'
-			' SELECT ? ip_min, ? ip_max, lat, lon'
-			' FROM ip_blocks WHERE loc_id = ? LIMIT 1', line )
-	log.debug('Dropping loc_id index entries')
-	cur.execute('DELETE FROM ip_blocks WHERE ip_min IS NULL AND ip_max IS NULL')
+		loc = loc_id.get(line[2])
+		if not loc:
+			log.debug('Unable to find location for loc_id {0}'.format(line[2]))
+			continue
+		cur.execute( 'INSERT INTO ip_blocks'
+			' (ip_min, ip_max, lat, lon) VALUES (?, ?, ?, ?)', line[:2] + loc )
 
 	log.debug('Adding indexes')
 	cur.execute('CREATE INDEX ip_from ON ip_blocks (ip_min)')
