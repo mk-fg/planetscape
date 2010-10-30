@@ -56,14 +56,37 @@ class MTR(BufferedExec):
 			self.transport.sentinel.callback(map( op.itemgetter(0),
 				it.groupby(line.split()[-1] for line in self._stdout.splitlines() if line[0] == 'h') ))
 
+class SS(BufferedExec):
+	def processEnded(self, stats):
+		if stats.value.exitCode: self.transport.sentinel.errback(self._stderr)
+		else:
+			trace_dsts = set()
+			for line in (line.strip().split() for line in self._stdout.splitlines()[1:]):
+				dst, dst_port = line[4].rsplit(':', 1)
+				dst = dst.split('::ffff:', 1)[-1]
+				if ':' in dst: continue # IPv6
+				trace_dsts.add(dst)
+			self.transport.sentinel.callback(trace_dsts)
+
+
+def proc_skel(*argz, **kwz):
+	proto, cmd = kwz.pop('protocol'), kwz.pop('command', None)
+	if not cmd: cmd = argz
+	elif argz or kwz: cmd = cmd(*argz, **kwz)
+	result = reactor.spawnProcess( proto(),
+		cmd[0], map(bytes, cmd) ).sentinel = defer.Deferred()
+	return result
+
+
+def _trace(ip):
+	tracer = optz.trace_tool(ip)
+	tracer.addCallback(lambda trace,ip=ip: (ip, ips_to_locs(trace)))
+	return tracer
+
 def trace(ip):
-	try: return defer.succeed(cache_trace(ip))
-	except KeyError:
-		trace_cmd = optz.trace_cmd(ip)
-		tracer = reactor.spawnProcess( optz.trace_proto(),
-			trace_cmd[0], map(bytes, trace_cmd) ).sentinel = defer.Deferred()
-		tracer.addCallback(ips_to_locs)
-		return tracer
+	try: return defer.succeed((ip, cache_trace(ip)))
+	except KeyError: return optz.trace_pool.run(_trace, ip)
+
 
 
 
@@ -79,7 +102,7 @@ def cache_trace(dst, trace=None):
 	if trace is None:
 		cur.execute('SELECT trace, ts FROM trace_cache WHERE dst = ?', (dst,))
 		try: trace, ts = next(cur)
-		except StopIteration: raise KeyError(None)
+		except StopIteration: raise KeyError
 		if ts < time() - optz.trace_cache_obsoletion: raise KeyError(ts)
 		return pickle.loads(bytes(trace))
 	else:
@@ -87,6 +110,7 @@ def cache_trace(dst, trace=None):
 			' INTO trace_cache (dst, trace, ts) VALUES (?, ?, ?)',
 			(dst, buffer(pickle.dumps(trace, -1)), int(time())) )
 		# GC
+		global _cache_gc_counter
 		try: _cache_gc_counter()
 		except StopIteration:
 			cur.execute('SELECT COUNT(*) FROM trace_cache')
@@ -97,7 +121,6 @@ def cache_trace(dst, trace=None):
 					' ORDER BY ts LIMIT ?', (clean_count,) )
 			_cache_gc_counter.reset()
 		except TypeError:
-			global _cache_gc_counter
 			_cache_gc_counter = countdown(optz.trace_cache_max_size / 10, 'trace_cache')
 		geoip_db.commit()
 
@@ -127,12 +150,35 @@ def ips_to_locs(ips):
 
 
 
-# class PlanetScape(object):
-# 	'One big TODO now ;)'
+from subprocess import Popen, PIPE
 
-# 	def __init__(self): pass
-# 	def render(self): pass
+class PlanetScape(object):
+	'Mostly TODO now ;)'
 
+	def __init__(self): pass
+
+	def snap(self):
+		optz.ns_tool().addCallback(self.run_traces)
+
+	_last_traces = None
+	def run_traces(self, trace_dsts):
+		if trace_dsts != self._last_traces:
+			defer.DeferredList(map(trace, trace_dsts))\
+				.addCallback(self.generate_arcs)
+			self._last_traces = trace_dsts
+		else: self.render() # skip "generate_arcs" part
+
+	def generate_arcs(self, traces):
+		for ip, trace in it.imap(op.itemgetter(1), it.ifilter(op.itemgetter(0), traces)):
+			print('IP: {0}, Trace: {1}'.format(ip, trace))
+			# lat, lon = home # TODO: define it
+			# for hop in trace:
+				# arcs.append(' '.join(lat, lon, *it.imap(unicode, hop), 'color={0}'.format(color))) # TODO: define it
+				# + marker (colored, some size should be defined)
+				# + end marker (different color/size, label: ip+service)
+		self.render()
+
+	def render(self): pass
 
 
 
@@ -240,12 +286,14 @@ def geoip_db_var(var, cur=None):
 	if cur is None: cur = geoip_db.cursor()
 	cur.execute('SELECT val FROM meta WHERE var = ?', (var,))
 	try: return next(cur)[0]
-	except StopIteration: raise NameError(var)
+	except StopIteration: raise KeyError(var)
 
 
 
 
 if __name__ == '__main__':
+	path_base = os.path.dirname(os.path.realpath(__file__))
+
 	from optparse import OptionParser
 	parser = OptionParser(usage='%prog [options]',
 		description='Render stuff on xplanet and run some hooks')
@@ -255,6 +303,11 @@ if __name__ == '__main__':
 	parser.add_option('-r', '--refresh', action='store', type='int',
 		default=60, help='Image refresh or re-generate rate (default: %default).')
 
+	parser.add_option('-n', '--ns-tool', action='store', default='ss',
+		type='str', help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
+	parser.add_option('--ns-tool-binary', action='store',
+		type='str', help='Path to binary for selected netstat-like tool, to override defaults.')
+
 	parser.add_option('-t', '--trace-tool', action='store', default='mtr',
 		type='str', help='Traceroute tool to use: mtr, traceroute (default: %default).')
 	parser.add_option('-c', '--trace-count', action='store', default=1,
@@ -263,6 +316,18 @@ if __name__ == '__main__':
 		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
 	parser.add_option('--trace-cache-max-size', action='store', default=50000,
 		type='int', help='Max number of cached traces to keep (default: %default).')
+	parser.add_option('--trace-tool-binary', action='store',
+		type='str', help='Path to binary for selected traceroute tool, to override defaults.')
+	parser.add_option('--trace-pool-size', action='store', default=20,
+		type='int', help='Max number of traceroute'
+			' subprocesses to spawn in parallel (default: %default).')
+
+	parser.add_option('--arc-base', action='store',
+		default=os.path.join(path_base, 'arcs.txt'),
+		type='str', help='File with arcs to include into rendered image (default: %default).')
+	parser.add_option('--marker-base', action='store',
+		default=os.path.join(path_base, 'markers.txt'),
+		type='str', help='File with markers to include into rendered image (default: %default).')
 
 	parser.add_option('-d', '--maxmind-db', action='store',
 		type='str', help='Path to new MaxMind database zip (look for it here:'
@@ -280,14 +345,26 @@ if __name__ == '__main__':
 	logging.basicConfig( level=logging.DEBUG
 		if optz.debug else logging.WARNING )
 
-	### Trace options
+	### Netstat/trace options
+	# I don't use raw /proc/net/tcp here because it does not contain v6-mapped
+	#  ipv4's, although I guess these should be available somewhere else
 	try:
-		optz.trace_proto, optz.trace_cmd = dict(
-			mtr = (MTR, lambda ip: ( '/usr/sbin/mtr',
-				'-c{0}'.format(optz.trace_count), '-r', '--raw', '--no-dns', ip )) )[optz.trace_tool]
+		optz.ns_tool = ft.partial( proc_skel,
+			**dict(it.izip((b'protocol', b'command'), dict(
+			ss = (SS, (optz.ns_tool_binary or '/sbin/ss', '-tn')) )[optz.ns_tool])) )
+	except KeyError:
+		parser.error(( 'Netstat-like command {0} protocol'
+			' is not implemented (yet?)' ).format(optz.ns_tool))
+
+	try:
+		optz.trace_tool = ft.partial( proc_skel,
+			**dict(it.izip((b'protocol', b'command'), dict(
+			mtr = (MTR, lambda ip: ( optz.trace_tool_binary or '/usr/sbin/mtr',
+				'-c{0}'.format(optz.trace_count), '-r', '--raw', '--no-dns', ip )) )[optz.trace_tool])) )
 	except KeyError:
 		parser.error(( 'Trace command {0} protocol'
 			' is not implemented (yet?)' ).format(optz.trace_tool))
+	optz.trace_pool = defer.DeferredSemaphore(optz.trace_pool_size)
 
 	### Check/expand paths
 	os.umask(077) # no need to share cache w/ someone
@@ -316,17 +393,17 @@ if __name__ == '__main__':
 		ts = os.stat(optz.maxmind_db).st_mtime
 		with sqlite3.connect(geoip_db_path) as link:
 			with closing(link.cursor()) as cur:
-				# try:
-				ts_chk = geoip_db_var('mmdb_timestamp', cur) + 1 # for rounding quirks
-				if ts_chk < ts:
-					log.debug( 'MaxMind archive seem to be newer'
-						' than sqlite db ({0} > {1})'.format(ts_chk, ts) )
-					raise NameError()
-				ts_chk = geoip_db_var('db_version', cur)
-				if ts_chk < geoip_db_ver: build_geoip_db(from_version=ts_chk, link=link, cur=cur)
-				# except (NameError, sqlite3.OperationalError):
-				# 	log.debug('Dropping sqlite geoip db cache')
-				# 	os.unlink(geoip_db_path)
+				try:
+					ts_chk = geoip_db_var('mmdb_timestamp', cur) + 1 # for rounding quirks
+					if ts_chk < ts:
+						log.debug( 'MaxMind archive seem to be newer'
+							' than sqlite db ({0} > {1})'.format(ts_chk, ts) )
+						raise KeyError
+					ts_chk = geoip_db_var('db_version', cur)
+					if ts_chk < geoip_db_ver: build_geoip_db(from_version=ts_chk, link=link, cur=cur)
+				except (KeyError, sqlite3.OperationalError):
+					log.debug('Dropping sqlite geoip db cache')
+					os.unlink(geoip_db_path)
 
 	## (Re)Build, if necessary
 	if not os.path.exists(geoip_db_path):
@@ -337,18 +414,10 @@ if __name__ == '__main__':
 
 	geoip_db = sqlite3.connect(geoip_db_path)
 
-	# Testing code
-	def fail(err):
-		raise err
-	def do_trace(ip):
-		tracer = trace(ip)
-		tracer.addCallback(print)
-		tracer.addErrback(fail)
-	reactor.callLater(0, do_trace, '8.8.8.8')
-
 	if not optz.oneshot:
-		# planescape = PlaneScape()
-		# render_task = LoopingCall(optz.refresh, planescape.render)
+		planetscape = PlanetScape()
+		reactor.callLater(0, planetscape.snap)
+		# render_task = LoopingCall(optz.refresh, planetscape.render)
 		reactor.run()
 	# else:
 	# 	PlaneScape().render()
