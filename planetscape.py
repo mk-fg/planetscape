@@ -139,7 +139,7 @@ def cache_object(key, value=None, ext=None):
 		return value
 
 
-def ip_to_loc(ip, cur=None):
+def _ip_to_loc(ip, cur=None):
 	if cur is None: cur = geoip_db.cursor()
 	cur.execute('SELECT ip_max, lat, lon FROM ip_blocks'
 		' WHERE ip_min <= ? ORDER BY ip_min DESC LIMIT 1', (ip,))
@@ -151,13 +151,14 @@ def ip_to_loc(ip, cur=None):
 def ips_to_locs(ips):
 	log.debug('Resolving locs for trace: {0}'.format(ips))
 	locs = list()
-	with closing(geoip_db.cursor()) as cur:
-		for ip in ips:
-			log.debug('Resolving IP: {0}'.format(ip))
-			ip = unpack(b'!i', socket.inet_aton(ip))[0]
-			try: locs.append(ip_to_loc(ip, cur))
-			except UnknownLocation: pass
-	return locs
+	cur = geoip_db.cursor()
+	for ip in ips:
+		log.debug('Resolving IP: {0}'.format(ip))
+		ip = unpack(b'!i', socket.inet_aton(ip))[0]
+		locs.append(defer.execute(_ip_to_loc, ip, cur))
+	return defer.DeferredList(locs, consumeErrors=True)\
+		.addCallback(lambda res: cur.close() or res)\
+		.addCallback(filtered_results).addCallback(list)
 
 
 def _trace(ip):
@@ -170,10 +171,8 @@ def trace(ip, port):
 	try: return defer.succeed((ip, port, cache()))
 	except KeyError:
 		ptr_lookup(ip).addErrback(lambda ign: None) # pre-cache ptr lookup result
-		tracer = optz.trace_pool.run(_trace, ip)
-		tracer.addCallback(cache)
-		tracer.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
-		return tracer
+		return optz.trace_pool.run(_trace, ip).addCallback(cache)\
+			.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
 
 
 from twisted.names.client import lookupPointer
@@ -196,9 +195,9 @@ def ptr_lookup(*ips):
 			except KeyError:
 				lookup = '{0}.in-addr.arpa'.format('.'.join(reversed(ip.split('.'))))
 				lookup = _active_lookups[ip] = lookupPointer(lookup)
-				lookup.addCallback(_lookup_process)
-				lookup.addCallback(cache)
-				lookup.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
+				lookup.addCallback(_lookup_process).addCallback(cache)\
+					.addErrback(lambda res,ip=ip: log.debug('Failed to get PTR record for {0}'.format(ip)) or res)\
+					.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
 			results.append(lookup)
 	return defer.DeferredList(results, consumeErrors=True) if len(results) > 1 else results[0]
 
