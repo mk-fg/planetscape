@@ -105,36 +105,37 @@ from struct import unpack
 class UnknownLocation(Exception): pass
 
 _cache_gc_counter = None
-def cache_trace(dst, trace=None):
-	if isinstance(dst, types.StringTypes): dst = unpack(b'!i', socket.inet_aton(dst))[0]
+def cache_object(key, value=None, ext=None):
+	if ext: key = '{0}__{1}'.format(ext, key)
+	key, key_hr = buffer(pickle.dumps(key, -1)), key
 	cur = geoip_db.cursor()
-	if trace is None:
-		cur.execute('SELECT trace, ts FROM trace_cache WHERE dst = ?', (dst,))
-		# exit()
-		try: trace, ts = next(cur)
+	if value is None:
+		cur.execute('SELECT value, ts FROM object_cache WHERE key = ?', (key,))
+		try: value, ts = next(cur)
 		except StopIteration: raise KeyError
-		if ts < time() - optz.trace_cache_obsoletion: raise KeyError(ts)
-		return pickle.loads(bytes(trace))
+		if ts < time() - optz.cache_obsoletion: raise KeyError(ts)
+		return pickle.loads(bytes(value))
 	else:
-		log.debug('Caching trace to {0}'.format(dst))
+		log.debug('Caching {0}'.format(key_hr))
 		cur.execute( 'INSERT OR REPLACE'
-			' INTO trace_cache (dst, trace, ts) VALUES (?, ?, ?)',
-			(dst, buffer(pickle.dumps(trace, -1)), int(time())) )
+			' INTO object_cache (key, value, ts) VALUES (?, ?, ?)',
+			(key, buffer(pickle.dumps(value, -1)), int(time())) )
 		# GC
 		global _cache_gc_counter
 		try: _cache_gc_counter()
+		except TypeError:
+			_cache_gc_counter = countdown(optz.cache_max_size / 10, 'object_cache')
 		except StopIteration:
-			cur.execute('SELECT COUNT(*) FROM trace_cache')
-			log.debug('GC - trace_cache oversaturation: {0}'.format(clean_count))
-			clean_count = next(cur)[0] - optz.trace_cache_max_size
+			cur.execute('SELECT COUNT(*) FROM object_cache')
+			log.debug('GC - object_cache oversaturation: {0}'.format(clean_count))
+			clean_count = next(cur)[0] - optz.cache_max_size
 			if clean_count > 0:
-				cur.execute( 'DELETE FROM trace_cache'
+				cur.execute( 'DELETE FROM object_cache'
 					' ORDER BY ts LIMIT ?', (clean_count,) )
 			_cache_gc_counter.reset()
-		except TypeError:
-			_cache_gc_counter = countdown(optz.trace_cache_max_size / 10, 'trace_cache')
 		geoip_db.commit()
-		return trace
+		return value
+
 
 def ip_to_loc(ip, cur=None):
 	if cur is None: cur = geoip_db.cursor()
@@ -156,18 +157,39 @@ def ips_to_locs(ips):
 			except UnknownLocation: pass
 	return locs
 
+
 def _trace(ip):
 	tracer = optz.trace_tool(ip)
 	tracer.addCallback(ips_to_locs)
 	return tracer
 
 def trace(ip, port):
-	try: return defer.succeed((ip, port, cache_trace(ip)))
+	cache = ft.partial(cache_object, ip, ext='trace')
+	try: return defer.succeed((ip, port, cache()))
 	except KeyError:
 		tracer = optz.trace_pool.run(_trace, ip)
-		tracer.addCallback(ft.partial(cache_trace, ip))
+		tracer.addCallback(cache)
 		tracer.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
 		return tracer
+
+
+from twisted.names.client import lookupPointer
+
+_active_lookups = dict() # no gc is necessary here, I hope
+def ns_lookup(*ips):
+	results = list()
+	for ip in ips:
+		if ip in _active_lookups: results.append(_active_lookups[ip])
+		else:
+			cache = ft.partial(cache_object, ip, ext='ptr')
+			try: lookup = defer.succeed(cache)
+			except KeyError:
+				lookup = _active_lookups[ip] = lookupPointer(ip)
+				lookup.addCallback(cache)
+				lookup.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
+			results.append(lookup)
+	return defer.DeferredList(results)
+
 
 
 
@@ -201,8 +223,9 @@ class PlanetScape(object):
 				markers.append(' '.join(str_cat(dst, 'color={0}'.format(color)))) # radius, font, align
 				src = dst
 			markers.pop() # last marker will be replaced w/ labelled one
+			label = ip
 			markers.append(' '.join(str_cat(
-				dst, '"{0}" color={1}'.format(ip, color) ))) # radius, font, align
+				dst, '"{0}" color={1}'.format(label, color) ))) # radius, font, align
 		with open(optz.instance_arcs, 'wb') as dst:
 			try: shutil.copyfileobj(open(optz.arc_base, 'rb'), dst)
 			except (OSError, IOError): pass
@@ -311,6 +334,11 @@ def build_geoip_db(from_version=0, link=None, cur=None):
 		cur.execute('CREATE TABLE trace_cache (dst INT PRIMARY KEY, ts INT, trace BLOB)')
 		cur.execute('CREATE INDEX trace_cache_ts ON trace_cache (ts)')
 
+	if from_version < 3:
+		cur.execute('DROP TABLE trace_cache')
+		cur.execute('CREATE TABLE object_cache (key BLOB PRIMARY KEY, value BLOB, ts INT)')
+		cur.execute('CREATE INDEX object_cache_ts ON object_cache (ts)')
+
 	log.debug('Updating db version to {0}'.format(geoip_db_ver))
 	cur.execute( 'INSERT OR REPLACE INTO meta'
 		" (var, val) VALUES ('db_version', ?)", (geoip_db_ver,) )
@@ -355,10 +383,6 @@ if __name__ == '__main__':
 		type='str', help='Traceroute tool to use: mtr, traceroute (default: %default).')
 	parser.add_option('-c', '--trace-count', action='store', default=1,
 		type='int', help='Number of tracer packets to send (default: %default).')
-	parser.add_option('--trace-cache-obsoletion', action='store', default=3600,
-		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
-	parser.add_option('--trace-cache-max-size', action='store', default=50000,
-		type='int', help='Max number of cached traces to keep (default: %default).')
 	parser.add_option('--trace-tool-binary', action='store',
 		type='str', help='Path to binary for selected traceroute tool, to override defaults.')
 	parser.add_option('--trace-pool-size', action='store', default=20,
@@ -388,6 +412,11 @@ if __name__ == '__main__':
 	parser.add_option('-s', '--spool-path', type='str', default='/var/tmp/planetscape',
 		help='Path for various temporary and cache data.'
 			' Dont have to be persistent, but it helps performance-wise.')
+
+	parser.add_option('--cache-obsoletion', action='store', default=3600,
+		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
+	parser.add_option('--cache-max-size', action='store', default=50000,
+		type='int', help='Max number of cached objects (traces, ns lookups) to keep (default: %default).')
 
 	parser.add_option('--debug', action='store_true',
 		help='Give extra info on whats going on.')
@@ -438,24 +467,25 @@ if __name__ == '__main__':
 	### GeoIP db management
 	import sqlite3
 	geoip_db_path = os.path.join(optz.spool_path, 'geoip.sqlite')
-	geoip_db_ver = 2
+	geoip_db_ver = 3
 
-	## Path/mtime checks
-	if os.path.exists(geoip_db_path) and optz.maxmind_db:
-		ts = os.stat(optz.maxmind_db).st_mtime
+	## Path/mtime/schema version checks
+	if os.path.exists(geoip_db_path):
 		with sqlite3.connect(geoip_db_path) as link:
 			with closing(link.cursor()) as cur:
 				try:
-					ts_chk = geoip_db_var('mmdb_timestamp', cur) + 1 # for rounding quirks
-					if ts_chk < ts:
-						log.debug( 'MaxMind archive seem to be newer'
-							' than sqlite db ({0} > {1})'.format(ts_chk, ts) )
-						raise KeyError
-					ts_chk = geoip_db_var('db_version', cur)
-					if ts_chk < geoip_db_ver: build_geoip_db(from_version=ts_chk, link=link, cur=cur)
+					if optz.maxmind_db:
+						ts = os.stat(optz.maxmind_db).st_mtime
+						ts_chk = geoip_db_var('mmdb_timestamp', cur) + 1 # for rounding quirks
+						if ts_chk < ts:
+							log.debug( 'MaxMind archive seem to be newer'
+								' than sqlite db ({0} > {1})'.format(ts_chk, ts) )
+							raise KeyError
 				except (KeyError, sqlite3.OperationalError):
 					log.debug('Dropping sqlite geoip db cache')
 					os.unlink(geoip_db_path)
+				ts_chk = geoip_db_var('db_version', cur)
+				if ts_chk < geoip_db_ver: build_geoip_db(from_version=ts_chk, link=link, cur=cur)
 
 	## (Re)Build, if necessary
 	if not os.path.exists(geoip_db_path):
@@ -563,5 +593,8 @@ if __name__ == '__main__':
 
 	planetscape = PlanetScape()
 	if optz.oneshot: reactor.callLater(0, planetscape.snap)
-	else: render_task = LoopingCall(optz.refresh, planetscape.snap)
+	else:
+		render_task = LoopingCall(planetscape.snap)
+		render_task.start(optz.refresh)
+	log.debug('Starting eventloop')
 	reactor.run()
