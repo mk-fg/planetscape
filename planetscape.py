@@ -42,6 +42,8 @@ def str_cat(*argz):
 					' (type: {0!r}): {1!r}'.format(type(arg), arg) )
 		else: yield unicode(arg)
 
+filtered_results = lambda results: it.imap(
+	op.itemgetter(1), it.ifilter(op.itemgetter(0), results) )
 
 
 import itertools as it, operator as op, functools as ft
@@ -167,6 +169,7 @@ def trace(ip, port):
 	cache = ft.partial(cache_object, ip, ext='trace')
 	try: return defer.succeed((ip, port, cache()))
 	except KeyError:
+		ptr_lookup(ip).addErrback(lambda ign: None) # pre-cache ptr lookup result
 		tracer = optz.trace_pool.run(_trace, ip)
 		tracer.addCallback(cache)
 		tracer.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
@@ -175,21 +178,29 @@ def trace(ip, port):
 
 from twisted.names.client import lookupPointer
 
+def _lookup_process(rec):
+	try:
+		rec = rec[0][0].payload
+		if rec.fancybasename != 'PTR': raise IndexError
+	except (IndexError, AttributeError): return None
+	else: return unicode(rec.name)
+
 _active_lookups = dict() # no gc is necessary here, I hope
-def ns_lookup(*ips):
+def ptr_lookup(*ips):
 	results = list()
 	for ip in ips:
 		if ip in _active_lookups: results.append(_active_lookups[ip])
 		else:
 			cache = ft.partial(cache_object, ip, ext='ptr')
-			try: lookup = defer.succeed(cache)
+			try: lookup = defer.succeed(cache())
 			except KeyError:
-				lookup = _active_lookups[ip] = lookupPointer(ip)
+				lookup = '{0}.in-addr.arpa'.format('.'.join(reversed(ip.split('.'))))
+				lookup = _active_lookups[ip] = lookupPointer(lookup)
+				lookup.addCallback(_lookup_process)
 				lookup.addCallback(cache)
 				lookup.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
 			results.append(lookup)
-	return defer.DeferredList(results) if len(results) > 1 else results[0]
-
+	return defer.DeferredList(results, consumeErrors=True) if len(results) > 1 else results[0]
 
 
 
@@ -207,14 +218,15 @@ class PlanetScape(object):
 		if traces_set != self._last_traces:
 			self._last_traces = traces_set
 			traces = yield defer.DeferredList(list(it.starmap(trace, traces)))
-		else:
-			return self.render() # skip repeating the same work
+		else: # skip repeating the same work
+			self.render()
+			raise StopIteration
 		del traces_set
 
-		arcs, markers = list(), list()
+		arcs, markers, endpoints = list(), list(), list()
 		markers.append(' '.join(str_cat( optz.home_lat,
 			optz.home_lon, '"{0}"'.format(optz.home_label) )))
-		for ip,port,geotrace in it.imap(op.itemgetter(1), it.ifilter(op.itemgetter(0), traces)):
+		for ip,port,geotrace in filtered_results(traces):
 			if not geotrace:
 				log.debug('Dropped completely unresolved trace to {0}'.format(ip))
 				continue
@@ -224,8 +236,11 @@ class PlanetScape(object):
 				arcs.append(' '.join(str_cat(src, dst, 'color={0}'.format(color)))) # spacing, thickness
 				markers.append(' '.join(str_cat(dst, 'color={0}'.format(color)))) # radius, font, align
 				src = dst
-			markers.pop() # last marker will be replaced w/ labelled one
-			label = ip
+			markers.pop() # last marker will be replaced w/ labeled endpoint
+			endpoints.append((ip, port, dst, color))
+		labels = yield ptr_lookup(*it.imap(op.itemgetter(0), endpoints))
+		for (res,label),(ip,port,dst,color) in it.izip(labels, endpoints):
+			label = '{0} ({1})'.format(label if res else ip, optz.svc_names.get(port, port))
 			markers.append(' '.join(str_cat(
 				dst, '"{0}" color={1}'.format(label, color) ))) # radius, font, align
 		with open(optz.instance_arcs, 'wb') as dst:
@@ -237,7 +252,7 @@ class PlanetScape(object):
 			except (OSError, IOError): pass
 			dst.write('\n' + '\n'.join(set(markers)) + '\n')
 
-		return self.render()
+		self.render()
 
 	def render(self):
 		log.debug('Rendering XPlanet image')
@@ -416,6 +431,8 @@ if __name__ == '__main__':
 		help='Path for various temporary and cache data.'
 			' Dont have to be persistent, but it helps performance-wise.')
 
+	parser.add_option('--discard-cache', action='store_true',
+		help='Invalidate trace/lookup caches on start.')
 	parser.add_option('--cache-obsoletion', action='store', default=3600,
 		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
 	parser.add_option('--cache-max-size', action='store', default=50000,
@@ -489,6 +506,9 @@ if __name__ == '__main__':
 					os.unlink(geoip_db_path)
 				ts_chk = geoip_db_var('db_version', cur)
 				if ts_chk < geoip_db_ver: build_geoip_db(from_version=ts_chk, link=link, cur=cur)
+				if optz.discard_cache:
+					cur.execute('DELETE FROM object_cache')
+					link.commit()
 
 	## (Re)Build, if necessary
 	if not os.path.exists(geoip_db_path):
@@ -562,7 +582,7 @@ if __name__ == '__main__':
 			'-latitude', optz.home_lat, '-longitude', optz.home_lon, optz.xplanet_args )) )
 
 
-	### Service colors
+	### Service colors/names
 	optz.svc_colors = {
 		'default': 0xffffff,
 		# basic stuff
@@ -592,10 +612,16 @@ if __name__ == '__main__':
 		7000: 0x990099 # ircs
 	}
 
+	optz.svc_names = dict()
+	for port in optz.svc_colors.iterkeys():
+		try: optz.svc_names[port] = socket.getservbyport(port)
+		except (TypeError, socket.error): pass
+
+
 	geoip_db = sqlite3.connect(geoip_db_path)
 
 	planetscape = PlanetScape()
-	if optz.oneshot: reactor.callLater(0, planetscape.snap)
+	if optz.oneshot: reactor.callWhenRunning(planetscape.snap)
 	else:
 		render_task = LoopingCall(planetscape.snap)
 		render_task.start(optz.refresh)
