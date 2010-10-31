@@ -5,7 +5,7 @@ from __future__ import unicode_literals, print_function
 from contextlib import closing
 import cPickle as pickle
 from time import time
-import os, sys, types
+import os, sys, types, socket, shutil, re
 
 import logging
 log = logging.getLogger()
@@ -32,6 +32,16 @@ def countdown(val, message=None, error=StopIteration):
 	counter.reset = reset
 	return counter
 
+def str_cat(*argz):
+	for arg in argz:
+		if not isinstance(arg, (types.StringTypes, int, float)):
+			try:
+				for arg in str_cat(*arg): yield arg
+			except TypeError:
+				raise TypeError( 'Uniterable arg'
+					' (type: {0!r}): {1!r}'.format(type(arg), arg) )
+		else: yield unicode(arg)
+
 
 
 import itertools as it, operator as op, functools as ft
@@ -48,6 +58,7 @@ class BufferedExec(protocol.ProcessProtocol):
 	def connectionMade(self): self.transport.closeStdin()
 	def outReceived(self, data): self._stdout += data
 	def errReceived(self, data): self._stderr += data
+	def processEnded(self, stats): self._stdout = self._stderr = ''
 
 class MTR(BufferedExec):
 	def processEnded(self, stats):
@@ -60,52 +71,52 @@ class SS(BufferedExec):
 	def processEnded(self, stats):
 		if stats.value.exitCode: self.transport.sentinel.errback(self._stderr)
 		else:
-			trace_dsts = set()
+			trace_dsts = list()
 			for line in (line.strip().split() for line in self._stdout.splitlines()[1:]):
 				dst, dst_port = line[4].rsplit(':', 1)
 				dst = dst.split('::ffff:', 1)[-1]
 				if ':' in dst: continue # IPv6
-				trace_dsts.add(dst)
+				trace_dsts.append((dst, int(dst_port)))
 			self.transport.sentinel.callback(trace_dsts)
+
+class XPlanet(BufferedExec):
+	def processEnded(self, stats):
+		if stats.value.exitCode:
+			log.error( 'XPlanet exited with error'
+				' (code: {0}):\n{1}'.format(stats.value.exitCode, self._stderr) )
+		if optz.oneshot:
+			log.debug('Exiting after first run because "oneshot" option was specified')
+			reactor.stop()
 
 
 def proc_skel(*argz, **kwz):
-	proto, cmd = kwz.pop('protocol'), kwz.pop('command', None)
+	cmd, proto = kwz.pop('command', None),\
+		kwz.pop('protocol', BufferedExec)
 	if not cmd: cmd = argz
-	elif argz or kwz: cmd = cmd(*argz, **kwz)
+	elif argz: cmd = cmd(*argz)
 	result = reactor.spawnProcess( proto(),
-		cmd[0], map(bytes, cmd) ).sentinel = defer.Deferred()
+		cmd[0], map(bytes, cmd), **kwz ).sentinel = defer.Deferred()
 	return result
 
 
-def _trace(ip):
-	tracer = optz.trace_tool(ip)
-	tracer.addCallback(lambda trace,ip=ip: (ip, ips_to_locs(trace)))
-	return tracer
 
-def trace(ip):
-	try: return defer.succeed((ip, cache_trace(ip)))
-	except KeyError: return optz.trace_pool.run(_trace, ip)
-
-
-
-
-from socket import inet_aton
 from struct import unpack
 
 class UnknownLocation(Exception): pass
 
 _cache_gc_counter = None
 def cache_trace(dst, trace=None):
-	if isinstance(dst, types.StringTypes): dst = unpack(b'!i', inet_aton(dst))[0]
+	if isinstance(dst, types.StringTypes): dst = unpack(b'!i', socket.inet_aton(dst))[0]
 	cur = geoip_db.cursor()
 	if trace is None:
 		cur.execute('SELECT trace, ts FROM trace_cache WHERE dst = ?', (dst,))
+		# exit()
 		try: trace, ts = next(cur)
 		except StopIteration: raise KeyError
 		if ts < time() - optz.trace_cache_obsoletion: raise KeyError(ts)
 		return pickle.loads(bytes(trace))
 	else:
+		log.debug('Caching trace to {0}'.format(dst))
 		cur.execute( 'INSERT OR REPLACE'
 			' INTO trace_cache (dst, trace, ts) VALUES (?, ?, ?)',
 			(dst, buffer(pickle.dumps(trace, -1)), int(time())) )
@@ -123,6 +134,7 @@ def cache_trace(dst, trace=None):
 		except TypeError:
 			_cache_gc_counter = countdown(optz.trace_cache_max_size / 10, 'trace_cache')
 		geoip_db.commit()
+		return trace
 
 def ip_to_loc(ip, cur=None):
 	if cur is None: cur = geoip_db.cursor()
@@ -139,23 +151,29 @@ def ips_to_locs(ips):
 	with closing(geoip_db.cursor()) as cur:
 		for ip in ips:
 			log.debug('Resolving IP: {0}'.format(ip))
-			ip = unpack(b'!i', inet_aton(ip))[0]
+			ip = unpack(b'!i', socket.inet_aton(ip))[0]
 			try: locs.append(ip_to_loc(ip, cur))
 			except UnknownLocation: pass
-	cache_trace(ip, locs)
 	return locs
 
+def _trace(ip):
+	tracer = optz.trace_tool(ip)
+	tracer.addCallback(ips_to_locs)
+	return tracer
+
+def trace(ip, port):
+	try: return defer.succeed((ip, port, cache_trace(ip)))
+	except KeyError:
+		tracer = optz.trace_pool.run(_trace, ip)
+		tracer.addCallback(ft.partial(cache_trace, ip))
+		tracer.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
+		return tracer
 
 
 
 
-
-from subprocess import Popen, PIPE
 
 class PlanetScape(object):
-	'Mostly TODO now ;)'
-
-	def __init__(self): pass
 
 	def snap(self):
 		optz.ns_tool().addCallback(self.run_traces)
@@ -163,22 +181,41 @@ class PlanetScape(object):
 	_last_traces = None
 	def run_traces(self, trace_dsts):
 		if trace_dsts != self._last_traces:
-			defer.DeferredList(map(trace, trace_dsts))\
-				.addCallback(self.generate_arcs)
+			defer.DeferredList(list(it.starmap(trace, trace_dsts)))\
+				.addCallback(self.generate_overlay)
 			self._last_traces = trace_dsts
-		else: self.render() # skip "generate_arcs" part
+		else: self.render() # skip "generate_overlay" part
 
-	def generate_arcs(self, traces):
-		for ip, trace in it.imap(op.itemgetter(1), it.ifilter(op.itemgetter(0), traces)):
-			print('IP: {0}, Trace: {1}'.format(ip, trace))
-			# lat, lon = home # TODO: define it
-			# for hop in trace:
-				# arcs.append(' '.join(lat, lon, *it.imap(unicode, hop), 'color={0}'.format(color))) # TODO: define it
-				# + marker (colored, some size should be defined)
-				# + end marker (different color/size, label: ip+service)
+	def generate_overlay(self, traces):
+		arcs, markers = list(), list()
+		markers.append(' '.join(str_cat( optz.home_lat,
+			optz.home_lon, '"{0}"'.format(optz.home_label) )))
+		for ip,port,trace in it.imap(op.itemgetter(1), it.ifilter(op.itemgetter(0), traces)):
+			if not trace:
+				log.debug('Dropped completely unresolved trace to {0}'.format(ip))
+				continue
+			src = optz.home_lat, optz.home_lon
+			color = '0x{0:06x}'.format(optz.svc_colors.get(port) or optz.svc_colors['default'])
+			for dst in trace:
+				arcs.append(' '.join(str_cat(src, dst, 'color={0}'.format(color)))) # spacing, thickness
+				markers.append(' '.join(str_cat(dst, 'color={0}'.format(color)))) # radius, font, align
+				src = dst
+			markers.pop() # last marker will be replaced w/ labelled one
+			markers.append(' '.join(str_cat(
+				dst, '"{0}" color={1}'.format(ip, color) ))) # radius, font, align
+		with open(optz.instance_arcs, 'wb') as dst:
+			try: shutil.copyfileobj(open(optz.arc_base, 'rb'), dst)
+			except (OSError, IOError): pass
+			dst.write('\n' + '\n'.join(set(arcs)) + '\n')
+		with open(optz.instance_markers, 'wb') as dst:
+			try: shutil.copyfileobj(open(optz.marker_base, 'rb'), dst)
+			except (OSError, IOError): pass
+			dst.write('\n' + '\n'.join(set(markers)) + '\n')
 		self.render()
 
-	def render(self): pass
+	def render(self):
+		log.debug('Rendering XPlanet image')
+		optz.xplanet(env=os.environ)
 
 
 
@@ -186,11 +223,10 @@ class PlanetScape(object):
 
 def build_geoip_db(from_version=0, link=None, cur=None):
 	if from_version < 1: # i.e. from scratch
-		from shutil import rmtree
 		## Unzip CSVs
 		unzip_root = os.path.join(optz.spool_path, 'mmdb_tmp')
 		log.debug('Unpacking MaxMind db (to: {0})'.format(unzip_root))
-		if os.path.exists(unzip_root): rmtree(unzip_root)
+		if os.path.exists(unzip_root): shutil.rmtree(unzip_root)
 		os.mkdir(unzip_root)
 
 		from subprocess import Popen, PIPE
@@ -212,7 +248,7 @@ def build_geoip_db(from_version=0, link=None, cur=None):
 			csv_loc_key.index, ('locId', 'latitude', 'longitude') ))
 
 		## Unlink paths (shouldn't be adressed again)
-		rmtree(unzip_root)
+		shutil.rmtree(unzip_root)
 
 		## Init src/dst
 		import csv
@@ -301,7 +337,14 @@ if __name__ == '__main__':
 	parser.add_option('-1', '--oneshot', action='store_true',
 		help='Generate single image with a complete set of traces and exit.')
 	parser.add_option('-r', '--refresh', action='store', type='int',
-		default=60, help='Image refresh or re-generate rate (default: %default).')
+		default=60, help='Image refresh or re-generate interval (default: %default).')
+	parser.add_option('--display', action='store', type='str',
+		help='X display to use (default: auto-determine from env).')
+
+	parser.add_option('-x', '--xplanet', action='store', default='xplanet',
+		type='str', help='XPlanet binary (default: %default).')
+	parser.add_option('--xplanet-args', action='store', default='',
+		type='str', help='Extra arguments to pass to XPlanet binary, separated by spaces.')
 
 	parser.add_option('-n', '--ns-tool', action='store', default='ss',
 		type='str', help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
@@ -321,6 +364,15 @@ if __name__ == '__main__':
 	parser.add_option('--trace-pool-size', action='store', default=20,
 		type='int', help='Max number of traceroute'
 			' subprocesses to spawn in parallel (default: %default).')
+
+	parser.add_option('--home-label', action='store', default=socket.gethostname(),
+		type='str', help='Label of home-location (default: %default).')
+	parser.add_option('--home-lat', action='store',
+		type='float', help='Latitude of the current location (default: autodetected'
+			' from external IP). Should only be specified along with --home-lon.')
+	parser.add_option('--home-lon', action='store',
+		type='float', help='Longitude of the current location (default: autodetected'
+			' from external IP). Should only be specified along with --home-lat.')
 
 	parser.add_option('--arc-base', action='store',
 		default=os.path.join(path_base, 'arcs.txt'),
@@ -345,27 +397,6 @@ if __name__ == '__main__':
 	logging.basicConfig( level=logging.DEBUG
 		if optz.debug else logging.WARNING )
 
-	### Netstat/trace options
-	# I don't use raw /proc/net/tcp here because it does not contain v6-mapped
-	#  ipv4's, although I guess these should be available somewhere else
-	try:
-		optz.ns_tool = ft.partial( proc_skel,
-			**dict(it.izip((b'protocol', b'command'), dict(
-			ss = (SS, (optz.ns_tool_binary or '/sbin/ss', '-tn')) )[optz.ns_tool])) )
-	except KeyError:
-		parser.error(( 'Netstat-like command {0} protocol'
-			' is not implemented (yet?)' ).format(optz.ns_tool))
-
-	try:
-		optz.trace_tool = ft.partial( proc_skel,
-			**dict(it.izip((b'protocol', b'command'), dict(
-			mtr = (MTR, lambda ip: ( optz.trace_tool_binary or '/usr/sbin/mtr',
-				'-c{0}'.format(optz.trace_count), '-r', '--raw', '--no-dns', ip )) )[optz.trace_tool])) )
-	except KeyError:
-		parser.error(( 'Trace command {0} protocol'
-			' is not implemented (yet?)' ).format(optz.trace_tool))
-	optz.trace_pool = defer.DeferredSemaphore(optz.trace_pool_size)
-
 	### Check/expand paths
 	os.umask(077) # no need to share cache w/ someone
 
@@ -382,6 +413,27 @@ if __name__ == '__main__':
 		log.debug('Creating spool path: {0}'.format(optz.spool_path))
 		os.mkdir(optz.spool_path)
 		os.chdir(optz.spool_path)
+
+
+	### Instance lock
+	optz.display = (optz.display or os.getenv('DISPLAY') or '').lstrip(':')
+	if not optz.display:
+		parser.error('Unable to determine X display for instance, try setting it explicitly')
+	elif not re.match('\d+(\.\d+)?', optz.display):
+		parser.error('Incorrect X display specification, expected something like ":1.0"')
+	optz.instance = 'planetscape_{0}'.format(optz.display)
+
+	import fcntl
+	optz.instance_lock = open(os.path.join(optz.spool_path, '{0}.lock'.format(optz.instance)), 'w+')
+	try: fcntl.flock(optz.instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+	except (OSError, IOError):
+		parser.error('Unable to secure instance lock for display "{0}"'.format(optz.display))
+	else:
+		optz.instance_lock.seek(0, os.SEEK_SET)
+		optz.instance_lock.truncate()
+		optz.instance_lock.write(str(os.getpid()) + '\n')
+		optz.instance_lock.flush()
+
 
 	### GeoIP db management
 	import sqlite3
@@ -412,13 +464,104 @@ if __name__ == '__main__':
 				' and no geoip data cached, one of these issues should be addressed.')
 		build_geoip_db()
 
+	## Static configuration file
+	optz.instance_conf = os.path.join(optz.spool_path, '{0}.conf'.format(optz.instance))
+	for k in 'arcs', 'markers':
+		path = os.path.join(optz.spool_path, k)
+		if not os.path.exists(path):
+			os.mkdir(path)
+		setattr(optz, 'instance_{0}'.format(k), os.path.join(path, optz.instance))
+	del k, path
+	with open(optz.instance_conf, 'wb') as conf:
+		conf.write('\n'.join([
+			'[default]', 'marker_color=red', 'shade=30', 'text_color={255,0,0}', 'twilight=6',
+			'[earth]', '"Earth"', 'image=earth.jpg', 'night_map=night.jpg', 'color={28, 82, 110}',
+			'arc_file={0}'.format(os.path.basename(optz.instance_arcs)),
+			'marker_file={0}'.format(os.path.basename(optz.instance_markers)),
+			'marker_fontsize=10' ])+'\n')
+
+
+	### Home location
+	if not optz.home_lat and optz.home_lon and (optz.home_lat or optz.home_lon):
+		parser.error('Either both latitude/longitude options should be specified or neither.')
+	if not optz.home_lat or not optz.home_lon:
+		log.debug('Determining home-location')
+		from BeautifulSoup import BeautifulSoup
+		from urllib2 import urlopen, URLError, HTTPError
+		socket_to = socket.getdefaulttimeout()
+		socket.setdefaulttimeout(10)
+		try:
+			soup = BeautifulSoup(urlopen( 'http://www.geobytes.com/'
+				'IpLocator.htm?GetLocation&template=php3.txt' ).read())
+			optz.home_lat = soup.find('meta', dict(name='latitude'))['content']
+			optz.home_lon = soup.find('meta', dict(name='longitude'))['content']
+		except (TypeError, KeyError, URLError, HTTPError):
+			parser.error('Unable to determine current location via online lookup')
+		finally: socket.setdefaulttimeout(socket_to)
+		log.debug('Auto-detected home-location: {0} {1}'.format(optz.home_lat, optz.home_lon))
+
+	### Netstat/trace/xplanet options
+	# I don't use raw /proc/net/tcp here because it does not contain v6-mapped
+	#  ipv4's, although I guess these should be available somewhere else
+	try:
+		optz.ns_tool = ft.partial( proc_skel,
+			**dict(it.izip((b'protocol', b'command'), dict(
+			ss = (SS, (optz.ns_tool_binary or '/sbin/ss', '-tn')) )[optz.ns_tool])) )
+	except KeyError:
+		parser.error(( 'Netstat-like command {0} protocol'
+			' is not implemented (yet?)' ).format(optz.ns_tool))
+
+	try:
+		optz.trace_tool = ft.partial( proc_skel,
+			**dict(it.izip((b'protocol', b'command'), dict(
+			mtr = (MTR, lambda ip: ( optz.trace_tool_binary or '/usr/sbin/mtr',
+				'-c{0}'.format(optz.trace_count), '-r', '--raw', '--no-dns', ip )) )[optz.trace_tool])) )
+	except KeyError:
+		parser.error(( 'Trace command {0} protocol'
+			' is not implemented (yet?)' ).format(optz.trace_tool))
+	optz.trace_pool = defer.DeferredSemaphore(optz.trace_pool_size)
+
+	optz.xplanet_args = optz.xplanet_args.strip().split()
+	if optz.oneshot: optz.xplanet_args += ['-num_times', '1']
+	optz.xplanet = ft.partial( proc_skel, protocol=XPlanet,
+		command=list(str_cat( optz.xplanet, '-searchdir', optz.spool_path,
+			'-config', os.path.basename(optz.instance_conf),
+			'-latitude', optz.home_lat, '-longitude', optz.home_lon, optz.xplanet_args )) )
+
+
+	### Service colors
+	optz.svc_colors = {
+		'default': 0xffffff,
+		# basic stuff
+		21: 0x00ffff, # ftp
+		22: 0xffff00, # ssh
+		23: 0xffff00, # telnet
+		53: 0x99ff00, # dns
+		79: 0x0099ff, # finger
+		# web
+		80: 0x9900ff, # http
+		443: 0x9900ff, # https
+		3128: 0x9900ff, # http proxy
+		# mail stuff
+		25: 0xff00ff, # smtp
+		110: 0xff9900, # pop3
+		119: 0xff9900, # nntp
+		143: 0xff9900, # imap
+		993: 0xff9900, # imaps
+		995: 0xff9900, # pop3s
+		# IM
+		5190: 0x009999, # AIM
+		5222: 0x009999, # XMPP (Jabber)
+		5223: 0x009999, # XMPP with old-fashioned SSL (GMail XMPP)
+		# others
+		873: 0x999900, # rsync
+		6667: 0x990099, # irc
+		7000: 0x990099 # ircs
+	}
+
 	geoip_db = sqlite3.connect(geoip_db_path)
 
-	if not optz.oneshot:
-		planetscape = PlanetScape()
-		reactor.callLater(0, planetscape.snap)
-		# render_task = LoopingCall(optz.refresh, planetscape.render)
-		reactor.run()
-	# else:
-	# 	PlaneScape().render()
-
+	planetscape = PlanetScape()
+	if optz.oneshot: reactor.callLater(0, planetscape.snap)
+	else: render_task = LoopingCall(optz.refresh, planetscape.snap)
+	reactor.run()
