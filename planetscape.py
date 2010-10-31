@@ -188,7 +188,7 @@ def ns_lookup(*ips):
 				lookup.addCallback(cache)
 				lookup.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
 			results.append(lookup)
-	return defer.DeferredList(results)
+	return defer.DeferredList(results) if len(results) > 1 else results[0]
 
 
 
@@ -197,28 +197,30 @@ def ns_lookup(*ips):
 
 class PlanetScape(object):
 
-	def snap(self):
-		optz.ns_tool().addCallback(self.run_traces)
-
 	_last_traces = None
-	def run_traces(self, trace_dsts):
-		if trace_dsts != self._last_traces:
-			defer.DeferredList(list(it.starmap(trace, trace_dsts)))\
-				.addCallback(self.generate_overlay)
-			self._last_traces = trace_dsts
-		else: self.render() # skip "generate_overlay" part
 
-	def generate_overlay(self, traces):
+	@defer.inlineCallbacks
+	def snap(self):
+		traces = yield optz.ns_tool()
+
+		traces_set = set(traces)
+		if traces_set != self._last_traces:
+			self._last_traces = traces_set
+			traces = yield defer.DeferredList(list(it.starmap(trace, traces)))
+		else:
+			return self.render() # skip repeating the same work
+		del traces_set
+
 		arcs, markers = list(), list()
 		markers.append(' '.join(str_cat( optz.home_lat,
 			optz.home_lon, '"{0}"'.format(optz.home_label) )))
-		for ip,port,trace in it.imap(op.itemgetter(1), it.ifilter(op.itemgetter(0), traces)):
-			if not trace:
+		for ip,port,geotrace in it.imap(op.itemgetter(1), it.ifilter(op.itemgetter(0), traces)):
+			if not geotrace:
 				log.debug('Dropped completely unresolved trace to {0}'.format(ip))
 				continue
 			src = optz.home_lat, optz.home_lon
 			color = '0x{0:06x}'.format(optz.svc_colors.get(port) or optz.svc_colors['default'])
-			for dst in trace:
+			for dst in geotrace:
 				arcs.append(' '.join(str_cat(src, dst, 'color={0}'.format(color)))) # spacing, thickness
 				markers.append(' '.join(str_cat(dst, 'color={0}'.format(color)))) # radius, font, align
 				src = dst
@@ -234,7 +236,8 @@ class PlanetScape(object):
 			try: shutil.copyfileobj(open(optz.marker_base, 'rb'), dst)
 			except (OSError, IOError): pass
 			dst.write('\n' + '\n'.join(set(markers)) + '\n')
-		self.render()
+
+		return self.render()
 
 	def render(self):
 		log.debug('Rendering XPlanet image')
