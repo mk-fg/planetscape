@@ -376,7 +376,7 @@ if __name__ == '__main__':
 	path_base = os.path.dirname(os.path.realpath(__file__))
 
 	from optparse import OptionParser
-	parser = OptionParser(usage='%prog [options]',
+	parser = OptionParser(usage='%prog [options] [-- xplanet args]',
 		description='Render stuff on xplanet and run some hooks')
 
 	parser.add_option('-1', '--oneshot', action='store_true',
@@ -388,8 +388,6 @@ if __name__ == '__main__':
 
 	parser.add_option('-x', '--xplanet', action='store', default='xplanet',
 		type='str', help='XPlanet binary (default: %default).')
-	parser.add_option('--xplanet-args', action='store', default='',
-		type='str', help='Extra arguments to pass to XPlanet binary, separated by spaces.')
 
 	parser.add_option('-n', '--ns-tool', action='store', default='ss',
 		type='str', help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
@@ -439,8 +437,13 @@ if __name__ == '__main__':
 
 	parser.add_option('--debug', action='store_true',
 		help='Give extra info on whats going on.')
-	optz,argz = parser.parse_args()
+
+	try: xplanet_args = sys.argv.index(b'--')
+	except ValueError: argz, xplanet_args = sys.argv[1:], list()
+	else: argz, xplanet_args = sys.argv[1:xplanet_args], sys.argv[xplanet_args+1:]
+	optz,argz = parser.parse_args(argz)
 	if argz: parser.error('This command takes no arguments')
+	optz.xplanet_args = xplanet_args
 
 	logging.basicConfig( level=logging.DEBUG
 		if optz.debug else logging.WARNING )
@@ -573,7 +576,6 @@ if __name__ == '__main__':
 			' is not implemented (yet?)' ).format(optz.trace_tool))
 	optz.trace_pool = defer.DeferredSemaphore(optz.trace_pool_size)
 
-	optz.xplanet_args = optz.xplanet_args.strip().split()
 	if optz.oneshot: optz.xplanet_args += ['-num_times', '1']
 	optz.xplanet = ft.partial( proc_skel, protocol=XPlanet,
 		command=list(str_cat( optz.xplanet, '-searchdir', optz.spool_path,
