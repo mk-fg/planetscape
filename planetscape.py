@@ -2,10 +2,36 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, print_function
 
+
+####################
+
+import os, sys, socket
+path_base = os.path.dirname(os.path.realpath(__file__))
+
+# defaults
+#  extended with derivatives and auto-detected stuff in initialize()
+#  overidden with ui values in __main__
+optz = dict(
+	refresh=60,
+	spool_path='/var/tmp/planetscape',
+	cache_max_size=50000, cache_obsoletion=3600,
+	home_label=socket.gethostname(),
+	arc_base=os.path.join(path_base, 'arcs.txt'),
+	marker_base=os.path.join(path_base, 'markers.txt'),
+	xplanet='xplanet', ns_tool='ss', trace_tool='mtr',
+	trace_count=1, trace_pool_size=20 )
+
+geoip_db_version = 3
+
+####################
+
+
+import itertools as it, operator as op, functools as ft
+
 from contextlib import closing
 import cPickle as pickle
 from time import time
-import os, sys, types, socket, shutil, re
+import types, shutil, re
 
 import logging
 log = logging.getLogger()
@@ -32,6 +58,7 @@ def countdown(val, message=None, error=StopIteration):
 	counter.reset = reset
 	return counter
 
+
 def str_cat(*argz):
 	for arg in argz:
 		if not isinstance(arg, (types.StringTypes, int, float)):
@@ -42,11 +69,35 @@ def str_cat(*argz):
 					' (type: {0!r}): {1!r}'.format(type(arg), arg) )
 		else: yield unicode(arg)
 
+
+from collections import Mapping
+types.MethodWrapperType = type(object().__hash__)
+
+class AttrDict(dict):
+	def __init__(self, *argz, **kwz):
+		for k,v in dict(*argz, **kwz).iteritems(): self[k] = v
+
+	def __setitem__(self, k, v):
+		super(AttrDict, self).__setitem__( k,
+			AttrDict(v) if isinstance(v, Mapping) else v )
+	def __getattr__(self, k):
+		if not k.startswith('__'): return self[k]
+		else: raise AttributeError # necessary for stuff like __deepcopy__ or __hash__
+	def __setattr__(self, k, v): self[k] = v
+
+	@classmethod
+	def _from_optz(cls, optz):
+		return cls( (attr, getattr(optz, attr))
+			for attr in dir(optz) if attr[0] != '_' and not isinstance( attr,
+				(types.BuiltinMethodType, types.MethodType,
+					types.MethodWrapperType, types.TypeType) ) )\
+			if not isinstance(optz, Mapping) else cls(optz)
+
+
 filtered_results = lambda results: it.imap(
 	op.itemgetter(1), it.ifilter(op.itemgetter(0), results) )
 
 
-import itertools as it, operator as op, functools as ft
 
 from twisted.internet.task import LoopingCall
 from twisted.internet import reactor, defer
@@ -86,9 +137,8 @@ class XPlanet(BufferedExec):
 		if stats.value.exitCode:
 			log.error( 'XPlanet exited with error'
 				' (code: {0}):\n{1}'.format(stats.value.exitCode, self._stderr) )
-		if optz.oneshot:
-			log.debug('Exiting after first run because "oneshot" option was specified')
-			reactor.stop()
+			self.transport.sentinel.errback(stats.value.exitCode)
+		else: self.transport.sentinel.callback(None)
 
 
 def proc_skel(*argz, **kwz):
@@ -107,7 +157,8 @@ from struct import unpack
 class UnknownLocation(Exception): pass
 
 _cache_gc_counter = None
-def cache_object(key, value=None, ext=None):
+def cache_object( geoip_db, key, value=None, ext=None,
+		obsoletion=optz['cache_obsoletion'], max_size=optz['cache_max_size'] ):
 	if ext: key = '{0}__{1}'.format(ext, key)
 	key, key_hr = buffer(pickle.dumps(key, -1)), key
 	cur = geoip_db.cursor()
@@ -115,7 +166,7 @@ def cache_object(key, value=None, ext=None):
 		cur.execute('SELECT value, ts FROM object_cache WHERE key = ?', (key,))
 		try: value, ts = next(cur)
 		except StopIteration: raise KeyError
-		if ts < time() - optz.cache_obsoletion: raise KeyError(ts)
+		if ts < time() - obsoletion: raise KeyError(ts)
 		return pickle.loads(bytes(value))
 	else:
 		log.debug('Caching {0}'.format(key_hr))
@@ -126,11 +177,11 @@ def cache_object(key, value=None, ext=None):
 		global _cache_gc_counter
 		try: _cache_gc_counter()
 		except TypeError:
-			_cache_gc_counter = countdown(optz.cache_max_size / 10, 'object_cache')
+			_cache_gc_counter = countdown(max_size / 10, 'object_cache')
 		except StopIteration:
 			cur.execute('SELECT COUNT(*) FROM object_cache')
 			log.debug('GC - object_cache oversaturation: {0}'.format(clean_count))
-			clean_count = next(cur)[0] - optz.cache_max_size
+			clean_count = next(cur)[0] - max_size
 			if clean_count > 0:
 				cur.execute( 'DELETE FROM object_cache'
 					' ORDER BY ts LIMIT ?', (clean_count,) )
@@ -139,8 +190,7 @@ def cache_object(key, value=None, ext=None):
 		return value
 
 
-def _ip_to_loc(ip, cur=None):
-	if cur is None: cur = geoip_db.cursor()
+def _ip_to_loc(ip, cur):
 	cur.execute('SELECT ip_max, lat, lon FROM ip_blocks'
 		' WHERE ip_min <= ? ORDER BY ip_min DESC LIMIT 1', (ip,))
 	try: ip_max, lat, lon = next(cur)
@@ -148,31 +198,28 @@ def _ip_to_loc(ip, cur=None):
 	if ip_max >= ip: return lat, lon
 	else: raise UnknownLocation()
 
-def ips_to_locs(ips):
+def ips_to_locs(ips, cur):
 	log.debug('Resolving locs for trace: {0}'.format(ips))
 	locs = list()
-	cur = geoip_db.cursor()
 	for ip in ips:
 		log.debug('Resolving IP: {0}'.format(ip))
 		ip = unpack(b'!i', socket.inet_aton(ip))[0]
 		locs.append(defer.execute(_ip_to_loc, ip, cur))
 	return defer.DeferredList(locs, consumeErrors=True)\
-		.addCallback(lambda res: cur.close() or res)\
 		.addCallback(filtered_results).addCallback(list)
 
 
-def _trace(ip):
-	tracer = optz.trace_tool(ip)
-	tracer.addCallback(ips_to_locs)
-	return tracer
-
-def trace(ip, port):
-	cache = ft.partial(cache_object, ip, ext='trace')
-	try: return defer.succeed((ip, port, cache()))
+def trace(ip, port, trace_tool, trace_pool=None, cache=None):
+	try:
+		if not cache: raise KeyError
+		cache = ft.partial(cache, ip, ext='trace')
+		return defer.succeed((ip, port, cache()))
 	except KeyError:
 		ptr_lookup(ip).addErrback(lambda ign: None) # pre-cache ptr lookup result
-		return optz.trace_pool.run(_trace, ip).addCallback(cache)\
-			.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
+		tracer = trace_pool.run(trace_tool, ip) if trace_pool else trace_tool(ip)
+		if cache: tracer.addCallback(cache)
+		tracer.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
+		return tracer
 
 
 from twisted.names.client import lookupPointer
@@ -185,18 +232,23 @@ def _lookup_process(rec):
 	else: return unicode(rec.name)
 
 _active_lookups = dict() # no gc is necessary here, I hope
-def ptr_lookup(*ips):
+def ptr_lookup(*ips, **kwz):
+	if not ips: return defer.succeed(list())
+	cache = kwz.pop('cache', None)
 	results = list()
 	for ip in ips:
 		if ip in _active_lookups: results.append(_active_lookups[ip])
 		else:
-			cache = ft.partial(cache_object, ip, ext='ptr')
-			try: lookup = defer.succeed(cache())
+			try:
+				if not cache: raise KeyError
+				cache = ft.partial(cache, ip, ext='ptr')
+				lookup = defer.succeed(cache())
 			except KeyError:
 				lookup = '{0}.in-addr.arpa'.format('.'.join(reversed(ip.split('.'))))
 				lookup = _active_lookups[ip] = lookupPointer(lookup)
-				lookup.addCallback(_lookup_process).addCallback(cache)\
-					.addErrback(lambda res,ip=ip: log.debug('Failed to get PTR record for {0}'.format(ip)) or res)\
+				lookup.addCallback(_lookup_process)
+				if cache: lookup.addCallback(cache)
+				lookup.addErrback(lambda res,ip=ip: log.debug('Failed to get PTR record for {0}'.format(ip)) or res)\
 					.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
 			results.append(lookup)
 	return defer.DeferredList(results, consumeErrors=True) if len(results) > 1 else results[0]
@@ -209,45 +261,53 @@ class PlanetScape(object):
 
 	_last_traces = None
 
+	def __init__(self, optz):
+		self.optz = optz
+
 	@defer.inlineCallbacks
 	def snap(self):
-		traces = yield optz.ns_tool()
+		traces = yield self.optz.ns_tool()
 
 		traces_set = set(traces)
 		if traces_set != self._last_traces:
 			self._last_traces = traces_set
-			traces = yield defer.DeferredList(list(it.starmap(trace, traces)))
+			traces = yield defer.DeferredList(list(it.starmap(self.optz.trace, traces)))
 		else: # skip repeating the same work
 			self.render()
 			raise StopIteration
 		del traces_set
 
 		arcs, markers, endpoints = list(), list(), list()
-		markers.append(' '.join(str_cat( optz.home_lat,
-			optz.home_lon, '"{0}"'.format(optz.home_label) )))
+		markers.append(' '.join(str_cat( self.optz.home_lat,
+			self.optz.home_lon, '"{0}"'.format(self.optz.home_label) )))
+
 		for ip,port,geotrace in filtered_results(traces):
 			if not geotrace:
 				log.debug('Dropped completely unresolved trace to {0}'.format(ip))
 				continue
-			src = optz.home_lat, optz.home_lon
-			color = '0x{0:06x}'.format(optz.svc_colors.get(port) or optz.svc_colors['default'])
+			src = self.optz.home_lat, self.optz.home_lon
+			color = '0x{0:06x}'.format(
+				self.optz.svc_colors.get(port) or self.optz.svc_colors['default'])
 			for dst in geotrace:
 				arcs.append(' '.join(str_cat(src, dst, 'color={0}'.format(color)))) # spacing, thickness
 				markers.append(' '.join(str_cat(dst, 'color={0}'.format(color)))) # radius, font, align
 				src = dst
 			markers.pop() # last marker will be replaced w/ labeled endpoint
 			endpoints.append((ip, port, dst, color))
-		labels = yield ptr_lookup(*it.imap(op.itemgetter(0), endpoints))
-		for (res,label),(ip,port,dst,color) in it.izip(labels, endpoints):
-			label = '{0} ({1})'.format(label if res else ip, optz.svc_names.get(port, port))
-			markers.append(' '.join(str_cat(
-				dst, '"{0}" color={1}'.format(label, color) ))) # radius, font, align
-		with open(optz.instance_arcs, 'wb') as dst:
-			try: shutil.copyfileobj(open(optz.arc_base, 'rb'), dst)
+
+		if endpoints:
+			labels = yield ptr_lookup(*it.imap(op.itemgetter(0), endpoints))
+			for (res,label),(ip,port,dst,color) in it.izip(labels, endpoints):
+				label = '{0} ({1})'.format(label if res else ip, self.optz.svc_names.get(port, port))
+				markers.append(' '.join(str_cat(
+					dst, '"{0}" color={1}'.format(label, color) ))) # radius, font, align
+
+		with open(self.optz.instance_arcs, 'wb') as dst:
+			try: shutil.copyfileobj(open(self.optz.arc_base, 'rb'), dst)
 			except (OSError, IOError): pass
 			dst.write('\n' + '\n'.join(set(arcs)) + '\n')
-		with open(optz.instance_markers, 'wb') as dst:
-			try: shutil.copyfileobj(open(optz.marker_base, 'rb'), dst)
+		with open(self.optz.instance_markers, 'wb') as dst:
+			try: shutil.copyfileobj(open(self.optz.marker_base, 'rb'), dst)
 			except (OSError, IOError): pass
 			dst.write('\n' + '\n'.join(set(markers)) + '\n')
 
@@ -255,22 +315,27 @@ class PlanetScape(object):
 
 	def render(self):
 		log.debug('Rendering XPlanet image')
-		optz.xplanet(env=os.environ)
+		deferred = self.optz.xplanet(env=os.environ)
+		if self.optz.oneshot:
+			deferred.addBoth(lambda ign: (log.debug( 'Exiting after first'
+				' run because "oneshot" option was specified' ), reactor.stop()))
 
 
 
 
 
-def build_geoip_db(from_version=0, link=None, cur=None):
+
+
+def build_geoip_db(spool_path, mmdb_zip, from_version=0, link=None, cur=None):
 	if from_version < 1: # i.e. from scratch
 		## Unzip CSVs
-		unzip_root = os.path.join(optz.spool_path, 'mmdb_tmp')
+		unzip_root = os.path.join(spool_path, 'mmdb_tmp')
 		log.debug('Unpacking MaxMind db (to: {0})'.format(unzip_root))
 		if os.path.exists(unzip_root): shutil.rmtree(unzip_root)
 		os.mkdir(unzip_root)
 
 		from subprocess import Popen, PIPE
-		Popen(['unzip', '-qq', optz.maxmind_db], cwd=unzip_root).wait()
+		Popen(['unzip', '-qq', mmdb_zip], cwd=unzip_root).wait()
 		from glob import glob
 		csvs = glob(os.path.join(unzip_root, '*', '*.csv'))
 		csv_blocks, = filter(lambda name: 'Blocks' in name, csvs)
@@ -356,95 +421,27 @@ def build_geoip_db(from_version=0, link=None, cur=None):
 		cur.execute('CREATE TABLE object_cache (key BLOB PRIMARY KEY, value BLOB, ts INT)')
 		cur.execute('CREATE INDEX object_cache_ts ON object_cache (ts)')
 
-	log.debug('Updating db version to {0}'.format(geoip_db_ver))
+	log.debug('Updating db version to {0}'.format(geoip_db_version))
 	cur.execute( 'INSERT OR REPLACE INTO meta'
-		" (var, val) VALUES ('db_version', ?)", (geoip_db_ver,) )
+		" (var, val) VALUES ('db_version', ?)", (geoip_db_version,) )
 
 	log.debug('Syncing database')
 	link.commit()
 
-def geoip_db_var(var, cur=None):
-	if cur is None: cur = geoip_db.cursor()
+
+
+def geoip_db_var(cur, var):
 	cur.execute('SELECT val FROM meta WHERE var = ?', (var,))
 	try: return next(cur)[0]
 	except StopIteration: raise KeyError(var)
 
 
+def initialize(optz):
+	'Prepare necessary paths, locks and geoip_db. Must be run before event-loop.'
 
+	optz = AttrDict._from_optz(optz)
 
-if __name__ == '__main__':
-	path_base = os.path.dirname(os.path.realpath(__file__))
-
-	from optparse import OptionParser
-	parser = OptionParser(usage='%prog [options] [-- xplanet args]',
-		description='Render stuff on xplanet and run some hooks')
-
-	parser.add_option('-1', '--oneshot', action='store_true',
-		help='Generate single image with a complete set of traces and exit.')
-	parser.add_option('-r', '--refresh', action='store', type='int',
-		default=60, help='Image refresh or re-generate interval (default: %default).')
-	parser.add_option('--display', action='store', type='str',
-		help='X display to use (default: auto-determine from env).')
-
-	parser.add_option('-x', '--xplanet', action='store', default='xplanet',
-		type='str', help='XPlanet binary (default: %default).')
-
-	parser.add_option('-n', '--ns-tool', action='store', default='ss',
-		type='str', help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
-	parser.add_option('--ns-tool-binary', action='store',
-		type='str', help='Path to binary for selected netstat-like tool, to override defaults.')
-
-	parser.add_option('-t', '--trace-tool', action='store', default='mtr',
-		type='str', help='Traceroute tool to use: mtr, traceroute (default: %default).')
-	parser.add_option('-c', '--trace-count', action='store', default=1,
-		type='int', help='Number of tracer packets to send (default: %default).')
-	parser.add_option('--trace-tool-binary', action='store',
-		type='str', help='Path to binary for selected traceroute tool, to override defaults.')
-	parser.add_option('--trace-pool-size', action='store', default=20,
-		type='int', help='Max number of traceroute'
-			' subprocesses to spawn in parallel (default: %default).')
-
-	parser.add_option('--home-label', action='store', default=socket.gethostname(),
-		type='str', help='Label of home-location (default: %default).')
-	parser.add_option('--home-lat', action='store',
-		type='float', help='Latitude of the current location (default: autodetected'
-			' from external IP). Should only be specified along with --home-lon.')
-	parser.add_option('--home-lon', action='store',
-		type='float', help='Longitude of the current location (default: autodetected'
-			' from external IP). Should only be specified along with --home-lat.')
-
-	parser.add_option('--arc-base', action='store',
-		default=os.path.join(path_base, 'arcs.txt'),
-		type='str', help='File with arcs to include into rendered image (default: %default).')
-	parser.add_option('--marker-base', action='store',
-		default=os.path.join(path_base, 'markers.txt'),
-		type='str', help='File with markers to include into rendered image (default: %default).')
-
-	parser.add_option('-d', '--maxmind-db', action='store',
-		type='str', help='Path to new MaxMind database zip (look for it here:'
-			' http://www.maxmind.com/app/geolitecity). May contain globbing wildcards,'
-			' (like * and ?). Must be specified at the first run.')
-	parser.add_option('-s', '--spool-path', type='str', default='/var/tmp/planetscape',
-		help='Path for various temporary and cache data.'
-			' Dont have to be persistent, but it helps performance-wise.')
-
-	parser.add_option('--discard-cache', action='store_true',
-		help='Invalidate trace/lookup caches on start.')
-	parser.add_option('--cache-obsoletion', action='store', default=3600,
-		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
-	parser.add_option('--cache-max-size', action='store', default=50000,
-		type='int', help='Max number of cached objects (traces, ns lookups) to keep (default: %default).')
-
-	parser.add_option('--debug', action='store_true',
-		help='Give extra info on whats going on.')
-
-	try: xplanet_args = sys.argv.index(b'--')
-	except ValueError: argz, xplanet_args = sys.argv[1:], list()
-	else: argz, xplanet_args = sys.argv[1:xplanet_args], sys.argv[xplanet_args+1:]
-	optz,argz = parser.parse_args(argz)
-	if argz: parser.error('This command takes no arguments')
-	optz.xplanet_args = xplanet_args
-
+	### Logging
 	logging.basicConfig( level=logging.DEBUG
 		if optz.debug else logging.WARNING )
 
@@ -465,7 +462,6 @@ if __name__ == '__main__':
 		os.mkdir(optz.spool_path)
 		os.chdir(optz.spool_path)
 
-
 	### Instance lock
 	optz.display = (optz.display or os.getenv('DISPLAY') or '').lstrip(':')
 	if not optz.display:
@@ -485,11 +481,10 @@ if __name__ == '__main__':
 		optz.instance_lock.write(str(os.getpid()) + '\n')
 		optz.instance_lock.flush()
 
-
 	### GeoIP db management
 	import sqlite3
 	geoip_db_path = os.path.join(optz.spool_path, 'geoip.sqlite')
-	geoip_db_ver = 3
+	geoip_db_build = ft.partial(build_geoip_db, optz.spool_path, optz.maxmind_db)
 
 	## Path/mtime/schema version checks
 	if os.path.exists(geoip_db_path):
@@ -498,7 +493,7 @@ if __name__ == '__main__':
 				try:
 					if optz.maxmind_db:
 						ts = os.stat(optz.maxmind_db).st_mtime
-						ts_chk = geoip_db_var('mmdb_timestamp', cur) + 1 # for rounding quirks
+						ts_chk = geoip_db_var(cur, 'mmdb_timestamp') + 1 # for rounding quirks
 						if ts_chk < ts:
 							log.debug( 'MaxMind archive seem to be newer'
 								' than sqlite db ({0} > {1})'.format(ts_chk, ts) )
@@ -506,8 +501,9 @@ if __name__ == '__main__':
 				except (KeyError, sqlite3.OperationalError):
 					log.debug('Dropping sqlite geoip db cache')
 					os.unlink(geoip_db_path)
-				ts_chk = geoip_db_var('db_version', cur)
-				if ts_chk < geoip_db_ver: build_geoip_db(from_version=ts_chk, link=link, cur=cur)
+				ts_chk = geoip_db_var(cur, 'db_version')
+				if ts_chk < geoip_db_version:
+					geoip_db_build(from_version=ts_chk, link=link, cur=cur)
 				if optz.discard_cache:
 					cur.execute('DELETE FROM object_cache')
 					link.commit()
@@ -517,7 +513,21 @@ if __name__ == '__main__':
 		if not optz.maxmind_db or not os.path.exists(optz.maxmind_db):
 			parser.error('No path to MaxMind GeoIP database specified'
 				' and no geoip data cached, one of these issues should be addressed.')
-		build_geoip_db()
+		geoip_db_build()
+
+	## Maps
+	if optz.get('image'):
+		try:
+			if isinstance(optz.image, types.StringTypes): raise ValueError
+			img_day, img_night = optz.image
+		except ValueError: img_day = img_night = optz.image
+		img_path = os.path.join(optz.spool_path, 'images')
+		if not os.path.exists(img_path): os.mkdir(img_path)
+		img_day_src, img_day = img_day, os.path.basename(img_day)
+		shutil.copy(img_day_src, os.path.join(img_path, img_day))
+		img_night_src, img_night = img_night, os.path.basename(img_night)
+		shutil.copy(img_night_src, os.path.join(img_path, img_night))
+	else: img_day, img_night = 'earth.jpg', 'night.jpg'
 
 	## Static configuration file
 	optz.instance_conf = os.path.join(optz.spool_path, '{0}.conf'.format(optz.instance))
@@ -530,11 +540,11 @@ if __name__ == '__main__':
 	with open(optz.instance_conf, 'wb') as conf:
 		conf.write('\n'.join([
 			'[default]', 'marker_color=red', 'shade=30', 'text_color={255,0,0}', 'twilight=6',
-			'[earth]', '"Earth"', 'image=earth.jpg', 'night_map=night.jpg', 'color={28, 82, 110}',
+			'[earth]', '"Earth"', 'color={28, 82, 110}',
+			'image={0}'.format(img_day), 'night_map={0}'.format(img_night),
 			'arc_file={0}'.format(os.path.basename(optz.instance_arcs)),
 			'marker_file={0}'.format(os.path.basename(optz.instance_markers)),
 			'marker_fontsize=10' ])+'\n')
-
 
 	### Home location
 	if not optz.home_lat and optz.home_lon and (optz.home_lat or optz.home_lon):
@@ -574,14 +584,12 @@ if __name__ == '__main__':
 	except KeyError:
 		parser.error(( 'Trace command {0} protocol'
 			' is not implemented (yet?)' ).format(optz.trace_tool))
-	optz.trace_pool = defer.DeferredSemaphore(optz.trace_pool_size)
 
 	if optz.oneshot: optz.xplanet_args += ['-num_times', '1']
 	optz.xplanet = ft.partial( proc_skel, protocol=XPlanet,
 		command=list(str_cat( optz.xplanet, '-searchdir', optz.spool_path,
 			'-config', os.path.basename(optz.instance_conf),
 			'-latitude', optz.home_lat, '-longitude', optz.home_lon, optz.xplanet_args )) )
-
 
 	### Service colors/names
 	optz.svc_colors = {
@@ -618,13 +626,97 @@ if __name__ == '__main__':
 		try: optz.svc_names[port] = socket.getservbyport(port)
 		except (TypeError, socket.error): pass
 
+	### Parametrized calls
+	optz.geoip_db = sqlite3.connect(geoip_db_path)
+	optz.cache = ft.partial( cache_object, optz.geoip_db,
+		obsoletion=optz.cache_obsoletion, max_size=optz.cache_max_size )
+	optz.trace = ft.partial( trace, cache=optz.cache,
+		trace_pool = defer.DeferredSemaphore(optz.trace_pool_size),
+		trace_tool = lambda ip, trace=optz.trace_tool, resolve=ft.partial(
+			ips_to_locs, cur=optz.geoip_db.cursor() ): trace(ip).addCallback(resolve) )
+	optz.ptr_lookup = ft.partial(ptr_lookup, cache=optz.cache)
 
-	geoip_db = sqlite3.connect(geoip_db_path)
+	return optz
 
-	planetscape = PlanetScape()
+
+
+if __name__ == '__main__':
+	optz = AttrDict(optz)
+
+	from optparse import OptionParser
+	parser = OptionParser(usage='%prog [options] [-- xplanet args]',
+		description='Render stuff on xplanet and run some hooks')
+
+	parser.add_option('-1', '--oneshot', action='store_true',
+		help='Generate single image with a complete set of traces and exit.')
+	parser.add_option('-r', '--refresh', action='store', type='int',
+		default=60, help='Image refresh or re-generate interval (default: %default).')
+	parser.add_option('--display', action='store', type='str',
+		help='X display to use (default: auto-determine from env).')
+
+	parser.add_option('-x', '--xplanet', action='store', default=optz.xplanet,
+		type='str', help='XPlanet binary (default: %default).')
+
+	parser.add_option('-n', '--ns-tool', action='store', default=optz.ns_tool,
+		type='str', help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
+	parser.add_option('--ns-tool-binary', action='store',
+		type='str', help='Path to binary for selected netstat-like tool, to override defaults.')
+
+	parser.add_option('-t', '--trace-tool', action='store', default=optz.trace_tool,
+		type='str', help='Traceroute tool to use: mtr, traceroute (default: %default).')
+	parser.add_option('-c', '--trace-count', action='store', default=optz.trace_count,
+		type='int', help='Number of tracer packets to send (default: %default).')
+	parser.add_option('--trace-tool-binary', action='store',
+		type='str', help='Path to binary for selected traceroute tool, to override defaults.')
+	parser.add_option('--trace-pool-size', action='store', default=optz.trace_pool_size,
+		type='int', help='Max number of traceroute'
+			' subprocesses to spawn in parallel (default: %default).')
+
+	parser.add_option('--home-label', action='store', default=optz.home_label,
+		type='str', help='Label of home-location (default: %default).')
+	parser.add_option('--home-lat', action='store',
+		type='float', help='Latitude of the current location (default: autodetected'
+			' from external IP). Should only be specified along with --home-lon.')
+	parser.add_option('--home-lon', action='store',
+		type='float', help='Longitude of the current location (default: autodetected'
+			' from external IP). Should only be specified along with --home-lat.')
+
+	parser.add_option('--arc-base', action='store', default=optz.arc_base,
+		type='str', help='File with arcs to include into rendered image (default: %default).')
+	parser.add_option('--marker-base', action='store', default=optz.marker_base,
+		type='str', help='File with markers to include into rendered image (default: %default).')
+
+	parser.add_option('-d', '--maxmind-db', action='store',
+		type='str', help='Path to new MaxMind database zip (look for it here:'
+			' http://www.maxmind.com/app/geolitecity). May contain globbing wildcards,'
+			' (like * and ?). Must be specified at the first run.')
+	parser.add_option('-s', '--spool-path', type='str', default=optz.spool_path,
+		help='Path for various temporary and cache data.'
+			' Dont have to be persistent, but it helps performance-wise.')
+
+	parser.add_option('--discard-cache', action='store_true',
+		help='Invalidate trace/lookup caches on start.')
+	parser.add_option('--cache-obsoletion', action='store', default=optz.cache_obsoletion,
+		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
+	parser.add_option('--cache-max-size', action='store', default=optz.cache_max_size,
+		type='int', help='Max number of cached objects (traces, ns lookups) to keep (default: %default).')
+
+	parser.add_option('--debug', action='store_true',
+		help='Give extra info on whats going on.')
+
+	try: xplanet_args = sys.argv.index(b'--')
+	except ValueError: argz, xplanet_args = sys.argv[1:], list()
+	else: argz, xplanet_args = sys.argv[1:xplanet_args], sys.argv[xplanet_args+1:]
+	optz_overlay,argz = parser.parse_args(argz)
+	if argz: parser.error('This command takes no arguments')
+	optz_overlay.xplanet_args = xplanet_args
+
+	optz = initialize(optz_overlay)
+	planetscape = PlanetScape(optz)
 	if optz.oneshot: reactor.callWhenRunning(planetscape.snap)
 	else:
 		render_task = LoopingCall(planetscape.snap)
 		render_task.start(optz.refresh)
 	log.debug('Starting eventloop')
 	reactor.run()
+
