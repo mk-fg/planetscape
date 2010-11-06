@@ -31,7 +31,7 @@ import itertools as it, operator as op, functools as ft
 from contextlib import closing
 import cPickle as pickle
 from time import time
-import types, shutil, re
+import types, shutil, re, sqlite3
 
 import logging
 log = logging.getLogger()
@@ -326,7 +326,7 @@ class PlanetScape(object):
 
 
 
-def build_geoip_db(spool_path, mmdb_zip, from_version=0, link=None, cur=None):
+def build_geoip_db(geoip_db_path, spool_path, mmdb_zip, from_version=0, link=None, cur=None):
 	if from_version < 1: # i.e. from scratch
 		## Unzip CSVs
 		unzip_root = os.path.join(spool_path, 'mmdb_tmp')
@@ -482,9 +482,9 @@ def initialize(optz):
 		optz.instance_lock.flush()
 
 	### GeoIP db management
-	import sqlite3
 	geoip_db_path = os.path.join(optz.spool_path, 'geoip.sqlite')
-	geoip_db_build = ft.partial(build_geoip_db, optz.spool_path, optz.maxmind_db)
+	geoip_db_build = ft.partial( build_geoip_db,
+		geoip_db_path, optz.spool_path, optz.maxmind_db )
 
 	## Path/mtime/schema version checks
 	if os.path.exists(geoip_db_path):
