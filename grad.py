@@ -1,72 +1,92 @@
 import itertools as it, operator as op, functools as ft
-from PIL import Image, ImageMath, ImageColor
 
 
 from collections import namedtuple
-from sympy.geometry import Point as _Point, Line
 import types
-
-class Point(_Point):
-	x = property(lambda s: s[0])
-	y = property(lambda s: s[1])
-	distance_from = lambda s, p: s.distance(s, p)
-
-class Offset(namedtuple('Offset', 'x y')):
-	__slots__ = ()
-	def from_point(self, *loc):
-		return Point(*((loc[i] + self[i]) for i in xrange(2)))
-	def on_canvas(self, size):
-		return Point(*(( self[i] if self[i] >= 0
-			else (size[i] + self[i]+1) ) for i in xrange(2)))
 
 class Color(namedtuple('Color', 'R G B A')):
 	__slots__ = ()
 	def __new__(cls, *color):
 		scons = super(Color, cls).__new__
-		if len(color) != 1:
+		if len(color) > 2:
 			if len(color) == 3: color = color + (0xff,)
 			return scons(cls, *color)
-		else:
-			color, = color
-			if isinstance(color, types.StringTypes): # PIL parses only RGB spec
-				return scons(cls, *(ImageColor.getrgb(color) + (0xff,)))
+		elif len(color) == 2:
+			color, alpha = color
+			if isinstance(alpha, float): alpha = int(alpha * 255)
+		else: (color,), alpha = color, None
+		if isinstance(color, types.StringTypes):
+			cs = str(color).lstrip('#').split('0x', 1)[-1]
+			cl = len(cs)
+			if cl not in (3,4,6,8): raise ValueError(color)
+			if alpha is None and cl in (3,6): alpha = 0xff
+			if cl in (3,4):
+				color = int( ''.join(it.chain.from_iterable((cs[i], cs[i]) for i in xrange(cl)))
+					+ '{0:02x}'.format(alpha) if alpha is not None else '', 16 )
 			else:
-				return scons(cls, *reversed([
-					int(0xff & (color >> x)) for x in xrange(0,32,8) ]))
+				color = int(cs, 16)
+				if cl == 6: color = (color << 8) + alpha
+			alpha = None # it's already taken into account
+		cl, alpha = (4, list()) if alpha is None else (3, [alpha])
+		return scons(cls, *(list(reversed([
+			int(0xff & (color >> x*8)) for x in xrange(cl) ])) + alpha))
+
+class CairoColor(Color):
+	__slots__ = ()
+	def __new__(cls, *color):
+		color = super(CairoColor, cls).__new__(cls, *color)
+		return super(Color, cls).__new__(cls, *(cs/255.0 for cs in color))
 
 
-## Wish I've had geometric algebra at school, so I could use sympy's GA ;)
-rel_pos = lambda a,b,c,p: a*p.x + b*p.y + c
+from collections import Iterable, Iterator
 
-def draw_gradient( img,
-		p1=Offset(0,0), p2=Offset(-1,-1),
-		rgba1=0xff0000ff, rgba2=0x00ff0088 ):
-	# Proof-of-concept.
-	# PIL doesn't seem to be able to draw arbitrary gradients internally,
-	#  guess I'll have to use something like pycairo for that.
-	# Horribly slow, to the point of being totally unusable!
-	# Not thoroughly tested.
-
-	p1, p2 = (( p.on_canvas(img.size)
-		if isinstance(p, Offset) else Point(*p) ) for p in (p1, p2))
-	rgba1, rgba2 = it.imap(Color, (rgba1, rgba2))
-
-	vec, dist = Line(p1, p2), p1.distance_from(p2)
-	n1, n2 = it.imap(vec.perpendicular_line, (p1, p2))
-	n1_pos, n2_pos = (ft.partial(rel_pos, *n.coefficients) for n in (n1, n2))
-
-	gpoint = lambda v2,v1,p: v1 + p * (v2 - v1)
-	gpoint = lambda p,bands=list( ft.partial(gpoint, v1, v2)
-		for v1,v2 in it.izip(rgba1, rgba2) ): tuple(int(round(f(p),0)) for f in bands)
-
-	for p3 in it.starmap(Point, it.product(*it.imap(xrange, img.size))):
-		np1, np2 = n1_pos(p3), n2_pos(p3)
-		if np1 <= 0 and np2 <= 0: rgba3 = rgba2
-		elif np1 >= 0 and np2 >= 0: rgba3 = rgba1
-		else: rgba3 = gpoint(n1.perpendicular_segment(p3).length / dist)
-		img.putpixel(p3, rgba3)
+def flatten(*vals):
+	for val in vals:
+		if isinstance(val, (Iterable, Iterator))\
+				and not isinstance(val, types.StringTypes):
+			for val in flatten(*val): yield val
+		else: yield val
 
 
-img = Image.new('RGBA', (30, 30))
-draw_gradient(img, Offset(5,5), p2=Offset(-5,-5))
-img.save('image.png')
+import cairo as c
+
+img = c.ImageSurface(c.FORMAT_ARGB32, 512, 768)
+ctx = c.Context(img)
+ctx.scale(img.get_width(), img.get_height())
+
+# Main pattern
+p1, p2 = (.75, .25), (.5, 1)
+grad = c.LinearGradient(*flatten(p1, p2))
+grad.add_color_stop_rgba(.25, *CairoColor('001200', 1.0))
+grad.add_color_stop_rgba(.5, *CairoColor('001000', .9))
+grad.add_color_stop_rgba(.8, *CairoColor('000a00', .7))
+grad.add_color_stop_rgba(1, *CairoColor('000', .5))
+ctx.rectangle(0, 0, 1, 1)
+ctx.set_source(grad)
+ctx.fill()
+
+# Edge fades
+ctx.set_operator(c.OPERATOR_DEST_OUT)
+p1 = 0,0
+for p2 in ((1,0),(0,1)):
+	grad = c.LinearGradient(*flatten(p1, p2))
+	grad.add_color_stop_rgba(0, *CairoColor(0, .1))
+	grad.add_color_stop_rgba(.15, *CairoColor(0, 0))
+	grad.add_color_stop_rgba(.85, *CairoColor(0, 0))
+	grad.add_color_stop_rgba(1, *CairoColor(0, .1))
+	ctx.rectangle(0, 0, 1, 1)
+	ctx.set_source(grad)
+	ctx.fill()
+ctx.set_operator(c.OPERATOR_OVER)
+
+# Light spot
+p1, p2 = (.75, .25), (.5, .5)
+grad = c.RadialGradient(*flatten(p1, 0, p2, .5))
+grad.add_color_stop_rgba(0, *CairoColor('fff', 0.1))
+grad.add_color_stop_rgba(1, *CairoColor('fff', 0))
+ctx.rectangle(0, 0, 1, 1)
+ctx.set_source(grad)
+ctx.fill()
+
+img.write_to_png('image.png')
+img.finish()
