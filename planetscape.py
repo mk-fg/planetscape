@@ -6,7 +6,8 @@ from __future__ import unicode_literals, print_function
 ####################
 
 import os, sys, socket
-path_base = os.path.dirname(os.path.realpath(__file__))
+from os.path import join, basename, dirname, realpath, exists, abspath
+path_base = dirname(realpath(__file__))
 
 # defaults
 #  extended with derivatives and auto-detected stuff in initialize()
@@ -16,8 +17,8 @@ optz = dict(
 	spool_path='/var/tmp/planetscape',
 	cache_max_size=50000, cache_obsoletion=3600,
 	home_label=socket.gethostname(),
-	arc_base=os.path.join(path_base, 'arcs.txt'),
-	marker_base=os.path.join(path_base, 'markers.txt'),
+	arc_base=join(path_base, 'arcs.txt'),
+	marker_base=join(path_base, 'markers.txt'),
 	xplanet='xplanet', ns_tool='ss', trace_tool='mtr',
 	trace_count=1, trace_pool_size=20 )
 
@@ -114,11 +115,13 @@ class BufferedExec(protocol.ProcessProtocol):
 	def processEnded(self, stats): self._stdout = self._stderr = ''
 
 class MTR(BufferedExec):
+	@staticmethod
+	def process_output(data):
+		return map( op.itemgetter(0),
+				it.groupby(line.split()[-1] for line in data.splitlines() if line[0] == 'h') )
 	def processEnded(self, stats):
 		if stats.value.exitCode: self.transport.sentinel.errback(self._stderr)
-		else:
-			self.transport.sentinel.callback(map( op.itemgetter(0),
-				it.groupby(line.split()[-1] for line in self._stdout.splitlines() if line[0] == 'h') ))
+		else: self.transport.sentinel.callback(self.process_output(self._stdout))
 
 class SS(BufferedExec):
 	def processEnded(self, stats):
@@ -215,7 +218,7 @@ def trace(ip, port, trace_tool, trace_pool=None, cache=None):
 		cache = ft.partial(cache, ip, ext='trace')
 		return defer.succeed((ip, port, cache()))
 	except KeyError:
-		ptr_lookup(ip).addErrback(lambda ign: None) # pre-cache ptr lookup result
+		ptr_lookup([ip]).addErrback(lambda ign: None) # pre-cache ptr lookup result
 		tracer = trace_pool.run(trace_tool, ip) if trace_pool else trace_tool(ip)
 		if cache: tracer.addCallback(cache)
 		tracer.addCallback(lambda res,ip=ip,port=port: (ip,port,res))
@@ -232,9 +235,8 @@ def _lookup_process(rec):
 	else: return unicode(rec.name)
 
 _active_lookups = dict() # no gc is necessary here, I hope
-def ptr_lookup(*ips, **kwz):
+def ptr_lookup(ips, cache=None):
 	if not ips: return defer.succeed(list())
-	cache = kwz.pop('cache', None)
 	results = list()
 	for ip in ips:
 		if ip in _active_lookups: results.append(_active_lookups[ip])
@@ -248,10 +250,11 @@ def ptr_lookup(*ips, **kwz):
 				lookup = _active_lookups[ip] = lookupPointer(lookup)
 				lookup.addCallback(_lookup_process)
 				if cache: lookup.addCallback(cache)
-				lookup.addErrback(lambda res,ip=ip: log.debug('Failed to get PTR record for {0}'.format(ip)) or res)\
+				lookup.addErrback( lambda res,ip=ip:\
+						log.debug('Failed to get PTR record for {0}'.format(ip)) or res )\
 					.addBoth(lambda res,ip=ip: _active_lookups.pop(ip, True) and res)
 			results.append(lookup)
-	return defer.DeferredList(results, consumeErrors=True) if len(results) > 1 else results[0]
+	return defer.DeferredList(results, consumeErrors=True)
 
 
 
@@ -266,16 +269,25 @@ class PlanetScape(object):
 
 	@defer.inlineCallbacks
 	def snap(self):
-		traces = yield self.optz.ns_tool()
+		if not self.optz.trace_dump:
+			traces = yield self.optz.ns_tool()
+			traces_set = set(traces)
+			if traces_set != self._last_traces:
+				self._last_traces = traces_set
+				traces = yield defer.DeferredList(list(it.starmap(self.optz.trace, traces)))
+			else: # skip repeating the same work
+				self.render()
+				raise StopIteration
+			del traces_set
 
-		traces_set = set(traces)
-		if traces_set != self._last_traces:
-			self._last_traces = traces_set
-			traces = yield defer.DeferredList(list(it.starmap(self.optz.trace, traces)))
-		else: # skip repeating the same work
-			self.render()
-			raise StopIteration
-		del traces_set
+		else:
+			traces = yield defer.DeferredList(list(
+				trace(
+					*basename(name).rsplit('__', 1),
+					trace_tool=lambda ip, src=open(name):\
+						defer.succeed(MTR.process_output(
+							src.read() )).addCallback(self.optz.resolve) )
+				for name in optz.trace_dump ))
 
 		arcs, markers, endpoints = list(), list(), list()
 		markers.append(' '.join(str_cat( self.optz.home_lat,
@@ -296,7 +308,7 @@ class PlanetScape(object):
 			endpoints.append((ip, port, dst, color))
 
 		if endpoints:
-			labels = yield ptr_lookup(*it.imap(op.itemgetter(0), endpoints))
+			labels = yield ptr_lookup(map(op.itemgetter(0), endpoints))
 			for (res,label),(ip,port,dst,color) in it.izip(labels, endpoints):
 				label = '{0} ({1})'.format(label if res else ip, self.optz.svc_names.get(port, port))
 				markers.append(' '.join(str_cat(
@@ -329,15 +341,15 @@ class PlanetScape(object):
 def build_geoip_db(geoip_db_path, spool_path, mmdb_zip, from_version=0, link=None, cur=None):
 	if from_version < 1: # i.e. from scratch
 		## Unzip CSVs
-		unzip_root = os.path.join(spool_path, 'mmdb_tmp')
+		unzip_root = join(spool_path, 'mmdb_tmp')
 		log.debug('Unpacking MaxMind db (to: {0})'.format(unzip_root))
-		if os.path.exists(unzip_root): shutil.rmtree(unzip_root)
+		if exists(unzip_root): shutil.rmtree(unzip_root)
 		os.mkdir(unzip_root)
 
 		from subprocess import Popen, PIPE
 		Popen(['unzip', '-qq', mmdb_zip], cwd=unzip_root).wait()
 		from glob import glob
-		csvs = glob(os.path.join(unzip_root, '*', '*.csv'))
+		csvs = glob(join(unzip_root, '*', '*.csv'))
 		csv_blocks, = filter(lambda name: 'Blocks' in name, csvs)
 		csv_loc, = filter(lambda name: 'Location' in name, csvs)
 		log.debug('Unpacked blocks: {0}, blocks-loc: {1}'.format(csv_blocks, csv_loc))
@@ -450,14 +462,14 @@ def initialize(optz):
 
 	if optz.maxmind_db:
 		from glob import iglob
-		try: optz.maxmind_db = os.path.abspath(sorted(iglob(optz.maxmind_db))[-1]) # latest one
+		try: optz.maxmind_db = abspath(sorted(iglob(optz.maxmind_db))[-1]) # latest one
 		except IndexError:
 			log.warn('Unable to stat MaxMind GeoIP database: {0}'.format(optz.maxmind_db))
 			optz.maxmind_db = None
 		log.debug('Globbed MaxMind db path: {0}'.format(optz.maxmind_db))
 
-	optz.spool_path = os.path.abspath(optz.spool_path)
-	if not os.path.exists(optz.spool_path):
+	optz.spool_path = abspath(optz.spool_path)
+	if not exists(optz.spool_path):
 		log.debug('Creating spool path: {0}'.format(optz.spool_path))
 		os.mkdir(optz.spool_path)
 		os.chdir(optz.spool_path)
@@ -471,7 +483,7 @@ def initialize(optz):
 	optz.instance = 'planetscape_{0}'.format(optz.display)
 
 	import fcntl
-	optz.instance_lock = open(os.path.join(optz.spool_path, '{0}.lock'.format(optz.instance)), 'w+')
+	optz.instance_lock = open(join(optz.spool_path, '{0}.lock'.format(optz.instance)), 'w+')
 	try: fcntl.flock(optz.instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 	except (OSError, IOError):
 		parser.error('Unable to secure instance lock for display "{0}"'.format(optz.display))
@@ -482,12 +494,12 @@ def initialize(optz):
 		optz.instance_lock.flush()
 
 	### GeoIP db management
-	geoip_db_path = os.path.join(optz.spool_path, 'geoip.sqlite')
+	geoip_db_path = join(optz.spool_path, 'geoip.sqlite')
 	geoip_db_build = ft.partial( build_geoip_db,
 		geoip_db_path, optz.spool_path, optz.maxmind_db )
 
 	## Path/mtime/schema version checks
-	if os.path.exists(geoip_db_path):
+	if exists(geoip_db_path):
 		with sqlite3.connect(geoip_db_path) as link:
 			with closing(link.cursor()) as cur:
 				try:
@@ -509,8 +521,8 @@ def initialize(optz):
 					link.commit()
 
 	## (Re)Build, if necessary
-	if not os.path.exists(geoip_db_path):
-		if not optz.maxmind_db or not os.path.exists(optz.maxmind_db):
+	if not exists(geoip_db_path):
+		if not optz.maxmind_db or not exists(optz.maxmind_db):
 			parser.error('No path to MaxMind GeoIP database specified'
 				' and no geoip data cached, one of these issues should be addressed.')
 		geoip_db_build()
@@ -521,29 +533,29 @@ def initialize(optz):
 			if isinstance(optz.image, types.StringTypes): raise ValueError
 			img_day, img_night = optz.image
 		except ValueError: img_day = img_night = optz.image
-		img_path = os.path.join(optz.spool_path, 'images')
-		if not os.path.exists(img_path): os.mkdir(img_path)
-		img_day_src, img_day = img_day, os.path.basename(img_day)
-		shutil.copy(img_day_src, os.path.join(img_path, img_day))
-		img_night_src, img_night = img_night, os.path.basename(img_night)
-		shutil.copy(img_night_src, os.path.join(img_path, img_night))
+		img_path = join(optz.spool_path, 'images')
+		if not exists(img_path): os.mkdir(img_path)
+		img_day_src, img_day = img_day, basename(img_day)
+		shutil.copy(img_day_src, join(img_path, img_day))
+		img_night_src, img_night = img_night, basename(img_night)
+		shutil.copy(img_night_src, join(img_path, img_night))
 	else: img_day, img_night = 'earth.jpg', 'night.jpg'
 
 	## Static configuration file
-	optz.instance_conf = os.path.join(optz.spool_path, '{0}.conf'.format(optz.instance))
+	optz.instance_conf = join(optz.spool_path, '{0}.conf'.format(optz.instance))
 	for k in 'arcs', 'markers':
-		path = os.path.join(optz.spool_path, k)
-		if not os.path.exists(path):
+		path = join(optz.spool_path, k)
+		if not exists(path):
 			os.mkdir(path)
-		setattr(optz, 'instance_{0}'.format(k), os.path.join(path, optz.instance))
+		setattr(optz, 'instance_{0}'.format(k), join(path, optz.instance))
 	del k, path
 	with open(optz.instance_conf, 'wb') as conf:
 		conf.write('\n'.join([
 			'[default]', 'marker_color=red', 'shade=30', 'text_color={255,0,0}', 'twilight=6',
 			'[earth]', '"Earth"', 'color={28, 82, 110}',
 			'image={0}'.format(img_day), 'night_map={0}'.format(img_night),
-			'arc_file={0}'.format(os.path.basename(optz.instance_arcs)),
-			'marker_file={0}'.format(os.path.basename(optz.instance_markers)),
+			'arc_file={0}'.format(basename(optz.instance_arcs)),
+			'marker_file={0}'.format(basename(optz.instance_markers)),
 			'marker_fontsize=10' ])+'\n')
 
 	### Home location
@@ -588,7 +600,7 @@ def initialize(optz):
 	if optz.oneshot: optz.xplanet_args += ['-num_times', '1']
 	optz.xplanet = ft.partial( proc_skel, protocol=XPlanet,
 		command=list(str_cat( optz.xplanet, '-searchdir', optz.spool_path,
-			'-config', os.path.basename(optz.instance_conf),
+			'-config', basename(optz.instance_conf),
 			'-latitude', optz.home_lat, '-longitude', optz.home_lon, optz.xplanet_args )) )
 
 	### Service colors/names
@@ -630,10 +642,11 @@ def initialize(optz):
 	optz.geoip_db = sqlite3.connect(geoip_db_path)
 	optz.cache = ft.partial( cache_object, optz.geoip_db,
 		obsoletion=optz.cache_obsoletion, max_size=optz.cache_max_size )
+	optz.resolve = ft.partial(ips_to_locs, cur=optz.geoip_db.cursor())
 	optz.trace = ft.partial( trace, cache=optz.cache,
 		trace_pool = defer.DeferredSemaphore(optz.trace_pool_size),
-		trace_tool = lambda ip, trace=optz.trace_tool, resolve=ft.partial(
-			ips_to_locs, cur=optz.geoip_db.cursor() ): trace(ip).addCallback(resolve) )
+		trace_tool = lambda ip, trace=optz.trace_tool:\
+			trace(ip).addCallback(optz.resolve) )
 	optz.ptr_lookup = ft.partial(ptr_lookup, cache=optz.cache)
 
 	return optz
@@ -649,56 +662,61 @@ if __name__ == '__main__':
 
 	parser.add_option('-1', '--oneshot', action='store_true',
 		help='Generate single image with a complete set of traces and exit.')
-	parser.add_option('-r', '--refresh', action='store', type='int',
+	parser.add_option('-r', '--refresh', type='int',
 		default=60, help='Image refresh or re-generate interval (default: %default).')
-	parser.add_option('--display', action='store', type='str',
+	parser.add_option('--display',
 		help='X display to use (default: auto-determine from env).')
 
-	parser.add_option('-x', '--xplanet', action='store', default=optz.xplanet,
-		type='str', help='XPlanet binary (default: %default).')
+	parser.add_option('-x', '--xplanet', default=optz.xplanet,
+		help='XPlanet binary (default: %default).')
 
-	parser.add_option('-n', '--ns-tool', action='store', default=optz.ns_tool,
-		type='str', help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
-	parser.add_option('--ns-tool-binary', action='store',
-		type='str', help='Path to binary for selected netstat-like tool, to override defaults.')
+	parser.add_option('-n', '--ns-tool', default=optz.ns_tool,
+		help='Tool to get network connection list: ss, netstat, lsof (default: %default).')
+	parser.add_option('--ns-tool-binary',
+		help='Path to binary for selected netstat-like tool, to override defaults.')
 
-	parser.add_option('-t', '--trace-tool', action='store', default=optz.trace_tool,
-		type='str', help='Traceroute tool to use: mtr, traceroute (default: %default).')
-	parser.add_option('-c', '--trace-count', action='store', default=optz.trace_count,
+	parser.add_option('-f', '--trace-dump', action='append',
+		help='Use pre-cached trace data (produced by'
+			' "mtr -c1 -r --raw --no-dns <host>"), with basename in'
+			' "dst_name__port" format. May be specified multiple times to draw'
+			' several routes. Implies --oneshot.')
+	parser.add_option('-t', '--trace-tool', default=optz.trace_tool,
+		help='Traceroute tool to use: mtr, traceroute (default: %default).')
+	parser.add_option('-c', '--trace-count', default=optz.trace_count,
 		type='int', help='Number of tracer packets to send (default: %default).')
-	parser.add_option('--trace-tool-binary', action='store',
-		type='str', help='Path to binary for selected traceroute tool, to override defaults.')
-	parser.add_option('--trace-pool-size', action='store', default=optz.trace_pool_size,
+	parser.add_option('--trace-tool-binary',
+		help='Path to binary for selected traceroute tool, to override defaults.')
+	parser.add_option('--trace-pool-size', default=optz.trace_pool_size,
 		type='int', help='Max number of traceroute'
 			' subprocesses to spawn in parallel (default: %default).')
 
-	parser.add_option('--home-label', action='store', default=optz.home_label,
-		type='str', help='Label of home-location (default: %default).')
-	parser.add_option('--home-lat', action='store',
+	parser.add_option('--home-label', default=optz.home_label,
+		help='Label of home-location (default: %default).')
+	parser.add_option('--home-lat',
 		type='float', help='Latitude of the current location (default: autodetected'
 			' from external IP). Should only be specified along with --home-lon.')
-	parser.add_option('--home-lon', action='store',
+	parser.add_option('--home-lon',
 		type='float', help='Longitude of the current location (default: autodetected'
 			' from external IP). Should only be specified along with --home-lat.')
 
-	parser.add_option('--arc-base', action='store', default=optz.arc_base,
-		type='str', help='File with arcs to include into rendered image (default: %default).')
-	parser.add_option('--marker-base', action='store', default=optz.marker_base,
-		type='str', help='File with markers to include into rendered image (default: %default).')
+	parser.add_option('--arc-base', default=optz.arc_base,
+		help='File with arcs to include into rendered image (default: %default).')
+	parser.add_option('--marker-base', default=optz.marker_base,
+		help='File with markers to include into rendered image (default: %default).')
 
-	parser.add_option('-d', '--maxmind-db', action='store',
-		type='str', help='Path to new MaxMind database zip (look for it here:'
+	parser.add_option('-d', '--maxmind-db',
+		help='Path to new MaxMind database zip (look for it here:'
 			' http://www.maxmind.com/app/geolitecity). May contain globbing wildcards,'
 			' (like * and ?). Must be specified at the first run.')
-	parser.add_option('-s', '--spool-path', type='str', default=optz.spool_path,
+	parser.add_option('-s', '--spool-path', default=optz.spool_path,
 		help='Path for various temporary and cache data.'
 			' Dont have to be persistent, but it helps performance-wise.')
 
 	parser.add_option('--discard-cache', action='store_true',
 		help='Invalidate trace/lookup caches on start.')
-	parser.add_option('--cache-obsoletion', action='store', default=optz.cache_obsoletion,
+	parser.add_option('--cache-obsoletion', default=optz.cache_obsoletion,
 		type='int', help='Time, after which cache entry considered obsolete (default: %default).')
-	parser.add_option('--cache-max-size', action='store', default=optz.cache_max_size,
+	parser.add_option('--cache-max-size', default=optz.cache_max_size,
 		type='int', help='Max number of cached objects (traces, ns lookups) to keep (default: %default).')
 
 	parser.add_option('--debug', action='store_true',
@@ -709,6 +727,7 @@ if __name__ == '__main__':
 	else: argz, xplanet_args = sys.argv[1:xplanet_args], sys.argv[xplanet_args+1:]
 	optz_overlay,argz = parser.parse_args(argz)
 	if argz: parser.error('This command takes no arguments')
+	if optz_overlay.trace_dump: optz_overlay.oneshot = True
 	optz_overlay.xplanet_args = xplanet_args
 
 	optz = initialize(optz_overlay)
@@ -719,4 +738,3 @@ if __name__ == '__main__':
 		render_task.start(optz.refresh)
 	log.debug('Starting eventloop')
 	reactor.run()
-
