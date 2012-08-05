@@ -1,4 +1,4 @@
-planetscape: desktop app to render network-related data to a world map
+planetscape: script to render network-related data to a world map (and optionally place it on desktop)
 --------------------
 
 A project of mine from a few years ago.
