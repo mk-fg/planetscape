@@ -25,6 +25,9 @@ Links
 
 * [Great overview of js libs/plugins for maps](http://techslides.com/50-javascript-libraries-and-plugins-for-maps/)
 
+* [GeoXPlanet app](http://sourceforge.net/projects/geoxplanet/) - source of the
+	idea behind this project, uses [XPlanet](http://xplanet.sourceforge.net/)
+
 * [node-webkit project](https://github.com/rogerwang/node-webkit)
 
 * Old [fossil](http://www.fossil-scm.org/) project:
