@@ -1,24 +1,58 @@
-name: hello
+# See https://github.com/rogerwang/node-webkit/wiki/Manifest-format
+
+name: planetscape
 main: index.html
-description: demo app of node-webkit
-version: 0.1.0
+description: render of network-related data on a world map
+version: 0.0.1
 
 keywords:
-  - demo
+  - planetscape
+  - traceroute
+  - network
+  - hops
+  - routing
+  - maxmind
+  - geoip
   - node-webkit
 
+repositories:
+  - type: git
+    url: https://github.com/mk-fg/planetscape/
+  - type: git
+    url: http://fraggod.net/code/git/planetscape/
+
+bugs: https://github.com/mk-fg/planetscape/issues
+
 window:
-  title: node-webkit demo
-  icon: link.png
-  toolbar: true
-  frame: false
+  title: planetscape
+  icon: planetscape-icon.png
+
   width: 800
   height: 500
-  position: mouse
-  min_width: 400
-  min_height: 200
-  max_width: 800
-  max_height: 600
+  # min_width: 400
+  # min_height: 200
+  # max_width: 800
+  # max_height: 600
 
-webkit:
-  plugin: true
+  # resizable: false
+  # show_in_taskbar: false
+  # toolbar: false
+  # frame: false
+  # as_desktop: true
+  # always-on-top: false
+  # fullscreen: false
+  # kiosk: false
+
+
+maintainers:
+  - &mk-fg
+    name: Mike Kazantsev
+    email: mk.fraggod@gmail.com
+    web: http://fraggod.net
+
+contributors:
+  - *mk-fg
+
+licenses:
+  - type: WTFPL
+    url: http://wtfpl.org/
