@@ -1,11 +1,13 @@
-planetscape: script to render network-related data to a world map (and optionally place it on desktop)
+planetscape
 --------------------
 
-A project of mine from a few years ago.
+Script to render network-related data to a world map (and optionally place it on
+desktop).
 
-Initial fossil import, not much to see here yet, though [stuff in
-fossil](http://fraggod.net/code/fossil/planetscape/) might prove to be more
-useful.
+A project of mine from a few years ago, imported from
+[old fossil repo](http://fraggod.net/code/fossil/planetscape/).
+
+In process of being converted from python + xplanet thing to a node-webkit app.
 
 
 Links
