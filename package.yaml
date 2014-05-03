@@ -1,7 +1,6 @@
 # See https://github.com/rogerwang/node-webkit/wiki/Manifest-format
 
 name: planetscape
-main: index.html
 description: render of network-related data on a world map
 version: 0.0.1
 
@@ -15,20 +14,17 @@ keywords:
   - geoip
   - node-webkit
 
-repositories:
-  - type: git
-    url: https://github.com/mk-fg/planetscape/
-  - type: git
-    url: http://fraggod.net/code/git/planetscape/
+main: index.html
 
-bugs: https://github.com/mk-fg/planetscape/issues
+## Fixes "InitializeSandbox() called with multiple threads in process gpu-process" with open ATI drivers
+# chromium-args: '--in-process-gpu'
 
 window:
   title: planetscape
-  icon: planetscape-icon.png
+  icon: images/icon.png
 
-  width: 800
-  height: 500
+  width: 1280
+  height: 900
   # min_width: 400
   # min_height: 200
   # max_width: 800
@@ -43,6 +39,17 @@ window:
   # fullscreen: false
   # kiosk: false
 
+webkit:
+  # Defined in shell_switches.cc, but doesn't seem to be implemented (yet?)
+  webgl: true
+
+repositories:
+  - type: git
+    url: https://github.com/mk-fg/planetscape/
+  - type: git
+    url: http://fraggod.net/code/git/planetscape/
+
+bugs: https://github.com/mk-fg/planetscape/issues
 
 maintainers:
   - &mk-fg

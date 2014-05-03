@@ -1,9 +1,9 @@
 # Uses python's sass and yaml/json modules
 
-JS_PATH=static/js
+JS_PATH=js
 JS_FILES=$(wildcard $(JS_PATH)/*.js)
 
-CSS_PATH=static/css
+CSS_PATH=css
 CSS_FILES=$(wildcard $(CSS_PATH)/*.css)
 
 all: coffee sass package.json
