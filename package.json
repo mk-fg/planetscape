@@ -1,9 +1,1 @@
-{
-	"name": "hello",
-	"main": "index.html",
-	"window": {
-		"toolbar": false,
-		"width": 800,
-		"height": 600
-	}
-}
+{"keywords": ["demo", "node-webkit"], "window": {"title": "node-webkit demo", "frame": false, "max_width": 800, "height": 500, "min_height": 200, "width": 800, "max_height": 600, "min_width": 400, "position": "mouse", "toolbar": true, "icon": "link.png"}, "version": "0.1.0", "name": "hello", "webkit": {"plugin": true}, "main": "index.html", "description": "demo app of node-webkit"}

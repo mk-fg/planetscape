@@ -1,0 +1,4 @@
+#!/bin/bash
+core_count=$(lscpu --parse=CORE | grep -vc '^#')
+[[ -z "$core_count" ]] && core_count=1
+make -s -j"${core_count}"
