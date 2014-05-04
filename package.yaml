@@ -16,9 +16,6 @@ keywords:
 
 main: index.html
 
-## Fixes "InitializeSandbox() called with multiple threads in process gpu-process" with open ATI drivers
-# chromium-args: '--in-process-gpu'
-
 window:
   title: planetscape
   icon: images/icon.png
@@ -39,9 +36,12 @@ window:
   # fullscreen: false
   # kiosk: false
 
-webkit:
-  # Defined in shell_switches.cc, but doesn't seem to be implemented (yet?)
-  webgl: true
+## Fixes "InitializeSandbox() called with multiple threads in process gpu-process" with open ATI drivers
+## Though WebGL in chromium is unusable anyway, so fuck it
+# chromium-args: '--in-process-gpu'
+# webkit:
+#   # Defined in shell_switches.cc, but doesn't seem to be implemented (yet?)
+#   webgl: true
 
 repositories:
   - type: git
