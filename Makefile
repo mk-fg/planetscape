@@ -15,7 +15,7 @@ sass: $(CSS_FILES)
 	coffee -c $<
 
 %.css: %.scss
-	sassc -I $(dir $<) $< >$@.new
+	PYTHONIOENCODING=utf-8 sassc -I $(dir $<) $< >$@.new
 	mv $@.new $@
 
 package.json: package.yaml

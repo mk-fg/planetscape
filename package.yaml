@@ -43,6 +43,10 @@ window:
 #   # Defined in shell_switches.cc, but doesn't seem to be implemented (yet?)
 #   webgl: true
 
+# js-flags: '--help'
+# js-flags: '--trace_exception'
+# js-flags: '--log --logfile=-'
+
 repositories:
   - type: git
     url: https://github.com/mk-fg/planetscape/
