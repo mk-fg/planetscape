@@ -25,6 +25,8 @@ Links
 
 * [Great overview of js libs/plugins for maps](http://techslides.com/50-javascript-libraries-and-plugins-for-maps/)
 
+* [More d3 map projections/ideas](http://www.jasondavies.com/maps/)
+
 * [GeoXPlanet app](http://sourceforge.net/projects/geoxplanet/) - source of the
 	idea behind this project, uses [XPlanet](http://xplanet.sourceforge.net/)
 
