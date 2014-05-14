@@ -13,7 +13,7 @@ opts =
 		'August': -> d3.geo.august().scale(60)
 		'Baker': -> d3.geo.baker().scale(100)
 		'Boggs': -> d3.geo.boggs()
-		'Bonne': -> d3.geo.bonne().scale(120)
+		'Bonne': -> d3.geo.bonne().scale(100)
 		'Bromley': -> d3.geo.bromley()
 		'Collignon': -> d3.geo.collignon().scale(93)
 		'Craster Parabolic': -> d3.geo.craster()
@@ -53,6 +53,10 @@ opts =
 		'van der Grinten': -> d3.geo.vanDerGrinten().scale(75)
 		'van der Grinten IV': -> d3.geo.vanDerGrinten4().scale(120)
 
+	defaults:
+		projection: 'Equirectangular (Plate Carrée)'
+
+
 # Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
 scale_factor = Math.min(opts.w / 960, opts.h / 500)
 for k, p0 of opts.projections
@@ -64,18 +68,19 @@ for k, p0 of opts.projections
 projections_idx = (k for k, v of opts.projections)
 
 
-projection = opts.projections['Aitoff']()
+projection_name = opts.defaults.projection
+projection = opts.projections[projection_name]()
+	.translate([opts.w / 2, opts.h / 2])
 path = d3.geo.path().projection(projection)
 graticule = d3.geo.graticule()
 
-svg = d3.select('.container').append('svg')
+svg = d3.select('svg')
 	.attr('width', opts.w)
 	.attr('height', opts.h)
-	.classed('centered', true)
+	.attr('class', 'centered')
 	.style(
 		'margin-left': '-' + (opts.w / 2) + 'px'
 		'margin-top': '-' + (opts.h / 2) + 'px' )
-	# .attr('viewBox', "0 0 #{opts.w} #{opts.h}")
 
 svg.append('defs').append('path')
 	.datum(type: 'Sphere')
@@ -101,15 +106,6 @@ svg.insert('path', '.graticule')
 	.attr('d', path)
 
 
-change = ->
-	k = projections_idx[this.selectedIndex]
-	update(name: k, projection: opts.projections[k]())
-
-update = (option) ->
-	svg.selectAll('path').transition()
-		.duration(750)
-		.attrTween('d', projectionTween(projection, projection = option.projection))
-
 projectionTween = (projection0, projection1) ->
 	(d) ->
 		project = (λ, φ) ->
@@ -121,16 +117,27 @@ projectionTween = (projection0, projection1) ->
 		projection = d3.geo.projection(project)
 			.scale(1)
 			.translate([opts.w / 2, opts.h / 2])
-		path = d3.geo.path()
-			.projection(projection)
+		path = d3.geo.path().projection(projection)
 		(_) ->
 			t = _
 			path(d)
 
-menu = d3.select('#projection-menu')
-	.on('change', change)
+update = ->
+	k = projections_idx[this.selectedIndex]
+	[projection0, projection] = [projection, opts.projections[k]()]
+	projection_name = k
+	svg.selectAll('path').transition()
+		.duration(750)
+		.attrTween('d', projectionTween(projection0, projection))
 
-menu.selectAll('option')
+menu_opts = d3.select('#projection-menu')
+		.style('display', 'block')
+		.on('change', update)
+	.selectAll('option')
 		.data({name: k, projection: v()} for k, v of opts.projections)
-	.enter().append('option')
-		.text (d) -> d.name
+
+menu_opts.enter().append('option')
+		.text((d) -> d.name)
+
+menu_opts
+		.attr('selected', (d) -> if d.name == projection_name then true else null)

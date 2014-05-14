@@ -16,7 +16,7 @@ Links
 * [Amazing WebGL-based three.js geo-related rendering apps](http://callum.com/sandbox/)
 
 * [Google Ideas project to render firearm imports/exports on the globe](http://workshop.chromeexperiments.com/projects/armsglobe/)
-	(three.js, d3.js, dat.GUI and more - see [Data Arts project](http://data-arts.appspot.com/))
+	(three.js, d3.js, dat.GUI and more - see also [Data Arts project](http://data-arts.appspot.com/))
 
 * [Nice wargames-style raphael.js map](https://github.com/mape/node-wargames)
 	(originally from [wargamez.mape.me](http://wargamez.mape.me), but that URL doesn't seem to work anymore)
