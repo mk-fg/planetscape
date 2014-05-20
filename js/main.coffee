@@ -1,5 +1,11 @@
 # require('nw.gui').Window.get().showDevTools()
 
+# util = require('util')
+EventEmitter = require('events').EventEmitter
+Mtr = require('mtr').Mtr
+geoip = require('geoip-lite')
+
+
 opts =
 
 	w: window.innerWidth * 0.9
@@ -54,6 +60,8 @@ opts =
 		'van der Grinten IV': -> d3.geo.vanDerGrinten4().scale(120)
 
 	defaults:
+		# XXX: configurable somehow (cli?)
+		source: [56.833333, 60.583333]
 		projection: 'Equirectangular (Plate Carrée)'
 
 
@@ -104,6 +112,148 @@ svg.insert('path', '.graticule')
 	.datum(topojson.feature(opts.world, opts.world.objects.land))
 	.attr('class', 'land')
 	.attr('d', path)
+
+
+class Cache extends EventEmitter
+
+	constructor: (data, @lwm=300, hwm_k=1.5) ->
+		super()
+		[@data, @hwm] = [d3.map(), @lwm * hwm_k]
+		if data
+			ts = (new Date()).getTime()
+			for own k,v of data
+				@set(k, v, ts)
+		@on('set', @clean)
+
+	has: (k) -> @data.has(k)
+
+	get: (k, ts) ->
+		v = @data.get(k)
+		if not v? then return v
+		if not ts?
+			ts = (new Date()).getTime()
+		v.ts = ts
+		@emit('get', k, v.v, ts)
+		return v.v
+
+	set: (k, v, ts) ->
+		if not ts?
+			ts = (new Date()).getTime()
+		@data.set(ts: ts, v: v)
+		@emit('set', k, v, ts)
+
+	clean: ->
+		if @data.size() <= @hwm then return
+		for e in @data.entries().sort((a, b) -> a.ts - b.ts)[..@lwm]
+			@data.remove(e.key)
+
+
+class Tracer extends EventEmitter
+
+	mtr_cycles: 1
+
+	geotrace: (ip) ->
+		mtr = new Mtr(ip, reportCycles: @mtr_cycles)
+		[self, hops] = [this, []]
+		[link_length, last_hop, label_buff] = [0, null, []]
+
+		hop_label_format = (hop) ->
+			label = hop.ip # XXX: maybe use hostnames here
+			if label_buff.length
+				label_buff.push(label)
+				label = label_buff.join(' -> ')
+				label_buff = []
+			return label
+
+		mtr.on 'hop', (hop) ->
+			link_length += 1
+			last_hop = hop
+			if hop.number == 1 or not hop.ip then return
+			geo = geoip.lookup(hop.ip)
+			if not geo
+				label_buff.push(label_addr)
+				return
+			label = hop_label_format(hop)
+			loc = if geo.city then "#{geo.city}, #{geo.country}" else "#{geo.country}"
+			hops.push
+				label: "#{label} (#{loc})"
+				geo: geo.ll
+				link: link_length # XXX: calculate from rtt or aggregate count thru this IP/range
+			[link_length, last_hop] = [0, null]
+
+		mtr.on 'end', ->
+			if last_hop
+				label = hop_label_format(last_hop)
+				hops.push
+					label: "#{label}"
+					geo: null
+					link: link_length
+			self.emit('trace', ip, hops)
+
+		mtr.on 'error', (err) ->
+			console.log('traceroute error (ip: #{ip}): #{err.message}')
+
+		mtr.traceroute()
+
+	conn_add: (ip) -> @emit('conn_add', ip)
+	conn_del: (ip) -> @emit('conn_del', ip)
+	conn_list: (ip_list) -> @emit('conn_list', ip_list)
+
+	constructor: ->
+		super()
+
+		@conn =
+			active: {}
+			pending: {}
+			cache: new Cache()
+
+		@on 'trace', (ip, hops) ->
+			if not @conn.pending[ip] then return
+			@conn.active[ip] = hops
+			@conn.cache.set(ip, hops)
+			delete @conn.pending[ip]
+
+		@on 'conn_add', (ip) ->
+			if @conn.active[ip] then return
+			hops = @conn.cache.get(ip)
+			if hops
+				@emit('trace', ip, hops)
+			else
+				@conn.pending[ip] = true
+				@geotrace(ip)
+
+		@on 'conn_del', (ip) ->
+			if not @conn.active[ip] then return
+			delete @conn.active[ip]
+			delete @conn.pending[ip]
+
+		@on 'conn_list', (ip_list) ->
+			active = @conn.active[..]
+			for ip in ip_list
+				if active[ip]
+					delete active.indexOf(ip)
+					continue
+				@conn_add('conn_add', ip)
+			for ip in active
+				@conn_del(ip)
+
+
+# o = projection(opts.defaults.source.reverse())
+# svg.append('svg:circle')
+# 	.attr('class','point')
+# 	.attr('cx', o[0])
+# 	.attr('cy', o[1])
+# 	.attr('r', 4)
+# 	.attr('title', 'source')
+
+# tracer = new Tracer()
+
+# tracer.on 'trace', (ip, hops) ->
+# 	console.log('trace')
+# 	for hop in hops
+# 		console.log(hop)
+
+# tracer.conn_add('8.8.8.8')
 
 
 projectionTween = (projection0, projection1) ->
