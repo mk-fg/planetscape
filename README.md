@@ -18,8 +18,10 @@ Links
 * [Google Ideas project to render firearm imports/exports on the globe](http://workshop.chromeexperiments.com/projects/armsglobe/)
 	(three.js, d3.js, dat.GUI and more - see also [Data Arts project](http://data-arts.appspot.com/))
 
-* [Nice wargames-style raphael.js map](https://github.com/mape/node-wargames)
-	(originally from [wargamez.mape.me](http://wargamez.mape.me), but that URL doesn't seem to work anymore)
+* Nice wargames-style raphael.js maps for irc/visitors data:
+	[maptail](https://github.com/stagas/maptail),
+	[node-wargames](https://github.com/mape/node-wargames)
+	(theme originally from [wargamez.mape.me](http://wargamez.mape.me), but that URL doesn't seem to work anymore)
 
 * [d3.js + pingdom api + geoip-lite maps php/js project](http://techslides.com/traceroute-on-a-map-using-pingdom-api-maxmind-and-d3/)
 
