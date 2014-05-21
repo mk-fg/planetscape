@@ -1,7 +1,26 @@
+
+'use strict'
+util = require('util')
+throw_err = (msg) -> throw new Error(msg or 'Unspecified Error')
+assert = (condition, msg) ->
+	# console.assert is kinda useless, as it doesn't actually stop the script
+	if not condition
+		if typeof(msg) != 'string'
+			dump(msg, 'Error Data Context')
+		throw_err(msg or 'Assertion failed')
+dump = (data, label='unlabeled object', opts={}) ->
+	if not opts.colors? then opts.colors = true
+	if not opts.depth? then opts.depth = 4
+	util.debug("#{label}\n" + util.inspect(data, opts))
+
+
 # require('nw.gui').Window.get().showDevTools()
 
-# util = require('util')
-EventEmitter = require('events').EventEmitter
+domain = require('domain')
+events = require('events')
+child_process = require('child_process')
+stream = require('stream')
+
 Mtr = require('mtr').Mtr
 geoip = require('geoip-lite')
 
@@ -63,7 +82,10 @@ opts =
 		# XXX: configurable somehow (cli?)
 		source: [56.833333, 60.583333]
 		projection: 'Equirectangular (Plate Carrée)'
+		conntrack_poll_interval: 3
 
+
+## Projection
 
 # Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
 scale_factor = Math.min(opts.w / 960, opts.h / 500)
@@ -74,7 +96,6 @@ for k, p0 of opts.projections
 			p.scale(p.scale() * scale_factor)
 				.translate(v * scale_factor for v in p.translate())
 projections_idx = (k for k, v of opts.projections)
-
 
 projection_name = opts.defaults.projection
 projection = opts.projections[projection_name]()
@@ -114,7 +135,49 @@ svg.insert('path', '.graticule')
 	.attr('d', path)
 
 
-class Cache extends EventEmitter
+## Projection options menu
+
+do ->
+	projectionTween = (projection0, projection1) ->
+		(d) ->
+			project = (λ, φ) ->
+				λ *= 180 / Math.PI
+				φ *= 180 / Math.PI
+				[p0, p1] = [projection0([λ, φ]), projection1([λ, φ])]
+				[(1 - t) * p0[0] + t * p1[0], (1 - t) * - p0[1] + t * -p1[1]]
+			t = 0
+			projection = d3.geo.projection(project)
+				.scale(1)
+				.translate([opts.w / 2, opts.h / 2])
+			path = d3.geo.path().projection(projection)
+			(_) ->
+				t = _
+				path(d)
+
+	update = ->
+		k = projections_idx[this.selectedIndex]
+		[projection0, projection] = [projection, opts.projections[k]()]
+		projection_name = k
+		svg.selectAll('path').transition()
+			.duration(750)
+			.attrTween('d', projectionTween(projection0, projection))
+
+	menu_opts = d3.select('#projection-menu')
+			.style('display', 'block')
+			.on('change', update)
+		.selectAll('option')
+			.data({name: k, projection: v()} for k, v of opts.projections)
+
+	menu_opts.enter().append('option')
+			.text((d) -> d.name)
+
+	menu_opts
+			.attr('selected', (d) -> if d.name == projection_name then true else null)
+
+
+## Geo trace and conntrack classes
+
+class Cache extends events.EventEmitter
 
 	constructor: (data, @lwm=300, hwm_k=1.5) ->
 		super()
@@ -148,7 +211,7 @@ class Cache extends EventEmitter
 			@data.remove(e.key)
 
 
-class Tracer extends EventEmitter
+class Tracer extends events.EventEmitter
 
 	mtr_cycles: 1
 
@@ -228,66 +291,121 @@ class Tracer extends EventEmitter
 			delete @conn.pending[ip]
 
 		@on 'conn_list', (ip_list) ->
-			active = @conn.active[..]
+			active = {}
+			for own ip, hops of @conn.active
+				active[k] = v
 			for ip in ip_list
 				if active[ip]
-					delete active.indexOf(ip)
+					delete active[ip]
 					continue
-				@conn_add('conn_add', ip)
-			for ip in active
+				@conn_add(ip)
+			for own ip, hops of active
 				@conn_del(ip)
 
-
-# o = projection(opts.defaults.source.reverse())
-# svg.append('svg:circle')
-# 	.attr('class','point')
-# 	.attr('cx', o[0])
-# 	.attr('cy', o[1])
-# 	.attr('r', 4)
-# 	.attr('title', 'source')
-
-# tracer = new Tracer()
-
-# tracer.on 'trace', (ip, hops) ->
-# 	console.log('trace')
-# 	for hop in hops
-# 		console.log(hop)
-
-# tracer.conn_add('8.8.8.8')
+	@in_domain: (d) ->
+		if not d then d = domain.create()
+		return d.run(-> new Tracer())
 
 
-projectionTween = (projection0, projection1) ->
-	(d) ->
-		project = (λ, φ) ->
-			λ *= 180 / Math.PI
-			φ *= 180 / Math.PI
-			[p0, p1] = [projection0([λ, φ]), projection1([λ, φ])]
-			[(1 - t) * p0[0] + t * p1[0], (1 - t) * - p0[1] + t * -p1[1]]
-		t = 0
-		projection = d3.geo.projection(project)
-			.scale(1)
-			.translate([opts.w / 2, opts.h / 2])
-		path = d3.geo.path().projection(projection)
-		(_) ->
-			t = _
-			path(d)
+class ConntrackSS extends events.EventEmitter
 
-update = ->
-	k = projections_idx[this.selectedIndex]
-	[projection0, projection] = [projection, opts.projections[k]()]
-	projection_name = k
-	svg.selectAll('path').transition()
-		.duration(750)
-		.attrTween('d', projectionTween(projection0, projection))
+	polling: true
 
-menu_opts = d3.select('#projection-menu')
-		.style('display', 'block')
-		.on('change', update)
-	.selectAll('option')
-		.data({name: k, projection: v()} for k, v of opts.projections)
+	poll: ->
+		self = this
 
-menu_opts.enter().append('option')
-		.text((d) -> d.name)
+		ss = child_process.spawn 'ss',
+			['-np', '-A', 'inet', 'state', 'established'],
+			stdio: ['ignore', 'pipe', process.stderr]
+		[ss_out, ss_err, ss_header, ss_buff] = ['', '', true, []]
 
-menu_opts
-		.attr('selected', (d) -> if d.name == projection_name then true else null)
+		ss.stdout.setEncoding('utf8')
+		ss.stdout.on 'data', (d) ->
+			ss_out += d
+			lines = ss_out.split('\n')
+			if lines.length < 2 then return
+			[ss_out, lines] = [lines[lines.length-1], lines[...-1]]
+			if ss_header then lines = lines[1..]
+
+			for line in lines
+				line = line.split(/\s+/)
+				assert(line.length in [5, 6])
+				if line.length == 6
+					[props, line] = [line[line.length-1], line[...-1]]
+				[proto, q_recv, q_send, s_local, s_remote] = line
+				[s_local, s_remote] =\
+					(s.match(/^(.+):(\d+)$/)[1..2] for s in [s_local, s_remote])
+
+				if props
+					try
+						props = users: (
+							p = props.match(/^users:\((.*)\)$/)
+							assert(p, "Can't match 'users:...' from: #{props}")
+							re = /\("((?:[^\\"]|\\.)*)",(\d+),(\d+)\)(?:,|$)/g # "-quoted voodoo
+							while m = re.exec(p[1])
+								cmd: m[1], pid: parseInt(m[2]), fd: parseInt(m[3]) )
+					catch e
+						throw_err("Failed to parse prop-string `#{props}': #{e}")
+
+				conn =
+					proto: proto
+					queues:
+						recv: parseInt(q_recv)
+						send: parseInt(q_send)
+					local:
+						addr: s_local[0]
+						port: parseInt(s_local[1])
+					remote:
+						addr: s_remote[0]
+						port: parseInt(s_remote[1])
+					props: props
+				ss_buff.push(conn)
+				# XXX: conntrack should be used with conn_add/conn_del interface
+				# self.emit('conn_add', conn)
+
+		ss.stdout.on 'end', ->
+			self.emit('conn_list', ss_buff)
+
+		ss.on 'exit', (code, sig) ->
+			if not code? or code != 0 or sig
+				throw_err("ss - exit with error: #{code}, #{sig}")
+		ss.on 'error', (err) -> throw_err("ss - failed to run: #{err}")
+
+	start: (poll_interval) ->
+		assert(not @timer, @timer)
+		@timer = do (s=@) -> setInterval((-> s.poll()), poll_interval * 1000)
+
+	stop: -> @timer = @timer and clearInterval(@timer) and null
+
+	@in_domain: (d) ->
+		if not d then d = domain.create()
+		return d.run(-> new ConntrackSS())
+
+
+## Main loop
+
+o = projection(opts.defaults.source.reverse())
+svg.append('svg:circle')
+	.attr('class','point')
+	.attr('cx', o[0])
+	.attr('cy', o[1])
+	.attr('r', 4)
+	.attr('title', 'source')
+
+do ->
+	tracer = Tracer.in_domain()
+	ct = ConntrackSS.in_domain()
+
+	# XXX: use other connection metadata (e.g. cmd/port for color)
+	if ct.polling
+		ct.on 'conn_list', (conn_list) ->
+			tracer.conn_list(conn.remote.addr for conn in conn_list)
+	else
+		ct.on 'conn_add', (conn) ->
+			tracer.conn_add(conn.remote.addr)
+		ct.on 'conn_del', (conn) ->
+			tracer.conn_del(conn.remote.addr)
+	ct.start(opts.defaults.conntrack_poll_interval)
+
+	# tracer.on 'trace', (ip, hops) ->
+	# 	dump(hops, "Trace to #{ip}")
