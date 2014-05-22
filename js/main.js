@@ -395,7 +395,7 @@
         }
         return label;
       };
-      mtr.on('hop', function(hop) {
+      return mtr.on('hop', function(hop) {
         var geo, label, loc, _ref3;
         link_length += 1;
         last_hop = hop;
@@ -415,8 +415,7 @@
           link: link_length
         });
         return _ref3 = [0, null], link_length = _ref3[0], last_hop = _ref3[1], _ref3;
-      });
-      mtr.on('end', function() {
+      }).on('end', function() {
         var label;
         if (last_hop) {
           label = hop_label_format(last_hop);
@@ -427,11 +426,9 @@
           });
         }
         return self.emit('trace', ip, hops);
-      });
-      mtr.on('error', function(err) {
+      }).on('error', function(err) {
         return console.log('traceroute error (ip: #{ip}): #{err.message}');
-      });
-      return mtr.traceroute();
+      }).traceroute();
     };
 
     Tracer.prototype.conn_add = function(ip) {
@@ -460,8 +457,7 @@
         this.conn.active[ip] = hops;
         this.conn.cache.set(ip, hops);
         return delete this.conn.pending[ip];
-      });
-      this.on('conn_add', function(ip) {
+      }).on('conn_add', function(ip) {
         var hops;
         if (this.conn.active[ip]) {
           return;
@@ -473,15 +469,13 @@
           this.conn.pending[ip] = true;
           return this.geotrace(ip);
         }
-      });
-      this.on('conn_del', function(ip) {
+      }).on('conn_del', function(ip) {
         if (!this.conn.active[ip]) {
           return;
         }
         delete this.conn.active[ip];
         return delete this.conn.pending[ip];
-      });
-      this.on('conn_list', function(ip_list) {
+      }).on('conn_list', function(ip_list) {
         var active, hops, ip, _i, _len, _ref1, _results;
         active = {};
         _ref1 = this.conn.active;
@@ -537,8 +531,9 @@
         stdio: ['ignore', 'pipe', process.stderr]
       });
       _ref1 = ['', '', true, []], ss_out = _ref1[0], ss_err = _ref1[1], ss_header = _ref1[2], ss_buff = _ref1[3];
-      ss.stdout.setEncoding('utf8');
-      ss.stdout.on('data', function(d) {
+      ss.stdout.on('end', function() {
+        return self.emit('conn_list', ss_buff);
+      }).on('data', function(d) {
         var conn, e, line, lines, m, p, props, proto, q_recv, q_send, re, s, s_local, s_remote, _i, _len, _ref2, _ref3, _ref4, _ref5, _results;
         ss_out += d;
         lines = ss_out.split('\n');
@@ -611,16 +606,12 @@
           _results.push(ss_buff.push(conn));
         }
         return _results;
-      });
-      ss.stdout.on('end', function() {
-        return self.emit('conn_list', ss_buff);
-      });
-      ss.on('exit', function(code, sig) {
+      }).setEncoding('utf8');
+      return ss.on('exit', function(code, sig) {
         if ((code == null) || code !== 0 || sig) {
           return throw_err("ss - exit with error: " + code + ", " + sig);
         }
-      });
-      return ss.on('error', function(err) {
+      }).on('error', function(err) {
         return throw_err("ss - failed to run: " + err);
       });
     };
@@ -675,8 +666,7 @@
     } else {
       ct.on('conn_add', function(conn) {
         return tracer.conn_add(conn.remote.addr);
-      });
-      ct.on('conn_del', function(conn) {
+      }).on('conn_del', function(conn) {
         return tracer.conn_del(conn.remote.addr);
       });
     }
