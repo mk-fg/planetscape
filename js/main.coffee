@@ -425,10 +425,11 @@ do ->
 			.on 'conn_del', (conn) ->
 				tracer.conn_del(conn.remote.addr)
 
-	source = label: 'source', geo: opts.defaults.source
+	# XXX: such straight lines are incorrect in pretty much any projection, fix that
 	trace_line = d3.svg.line()
 		.x((d) -> d[0])
 		.y((d) -> d[1])
+	source = label: 'source', geo: opts.defaults.source
 
 	draw_traces = (traces) ->
 		data = ( {ip: ip, trace: trace}\
