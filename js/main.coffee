@@ -5,7 +5,7 @@ throw_err = (msg) -> throw new Error(msg or 'Unspecified Error')
 assert = (condition, msg) ->
 	# console.assert is kinda useless, as it doesn't actually stop the script
 	if not condition
-		if typeof(msg) != 'string'
+		if msg? and typeof(msg) != 'string'
 			dump(msg, 'Error Data Context')
 		throw_err(msg or 'Assertion failed')
 dump = (data, label='unlabeled object', opts={}) ->
@@ -82,26 +82,38 @@ opts =
 		# XXX: configurable somehow (cli?)
 		source: [56.833333, 60.583333]
 		projection: 'Equirectangular (Plate Carrée)'
-		conntrack_poll_interval: 3
+		conntrack_poll_interval: 5
+		draw_interval: 3
+		# XXX: maybe some rate-limiting for traceroute stuff
+
+# Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
+do ->
+	scale_factor = Math.min(opts.w / 960, opts.h / 500)
+	for k, p0 of opts.projections
+		do (p0) ->
+			opts.projections[k] = ->
+				p = p0().rotate([0, 0, 0]).center([0, 0])
+				p.scale(p.scale() * scale_factor)
+					.translate(v * scale_factor for v in p.translate())
 
 
 ## Projection
 
-# Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
-scale_factor = Math.min(opts.w / 960, opts.h / 500)
-for k, p0 of opts.projections
-	do (p0) ->
-		opts.projections[k] = ->
-			p = p0().rotate([0, 0, 0]).center([0, 0])
-			p.scale(p.scale() * scale_factor)
-				.translate(v * scale_factor for v in p.translate())
-projections_idx = (k for k, v of opts.projections)
+proj =
+	name: opts.defaults.projection
+	func: null
+	path: null
 
-projection_name = opts.defaults.projection
-projection = opts.projections[projection_name]()
+	list: (k for k, v of opts.projections)
+	graticule: d3.geo.graticule()
+
+	traces: null
+	markers: null
+
+# XXX: these always go together - make proj.func/path reactive
+proj.func = opts.projections[proj.name]()
 	.translate([opts.w / 2, opts.h / 2])
-path = d3.geo.path().projection(projection)
-graticule = d3.geo.graticule()
+proj.path = d3.geo.path().projection(proj.func)
 
 svg = d3.select('svg')
 	.attr('width', opts.w)
@@ -114,7 +126,7 @@ svg = d3.select('svg')
 svg.append('defs').append('path')
 	.datum(type: 'Sphere')
 	.attr('id', 'sphere')
-	.attr('d', path)
+	.attr('d', proj.path)
 
 svg.append('use')
 	.attr('class', 'stroke')
@@ -125,14 +137,20 @@ svg.append('use')
 	.attr('xlink:href', '#sphere')
 
 svg.append('path')
-	.datum(graticule)
+	.datum(proj.graticule)
 	.attr('class', 'graticule')
-	.attr('d', path)
+	.attr('d', proj.path)
 
 svg.insert('path', '.graticule')
 	.datum(topojson.feature(opts.world, opts.world.objects.land))
 	.attr('class', 'land')
-	.attr('d', path)
+	.attr('d', proj.path)
+
+proj.traces = svg.append('g')
+	.attr('id', 'traces')
+
+proj.markers = svg.append('g')
+	.attr('id', 'markers')
 
 
 ## Projection options menu
@@ -146,21 +164,21 @@ do ->
 				[p0, p1] = [projection0([λ, φ]), projection1([λ, φ])]
 				[(1 - t) * p0[0] + t * p1[0], (1 - t) * - p0[1] + t * -p1[1]]
 			t = 0
-			projection = d3.geo.projection(project)
+			proj.func = d3.geo.projection(project)
 				.scale(1)
 				.translate([opts.w / 2, opts.h / 2])
-			path = d3.geo.path().projection(projection)
+			proj.path = d3.geo.path().projection(proj.func)
 			(_) ->
 				t = _
-				path(d)
+				proj.path(d)
 
 	update = ->
-		k = projections_idx[this.selectedIndex]
-		[projection0, projection] = [projection, opts.projections[k]()]
-		projection_name = k
+		k = proj.list[this.selectedIndex]
+		[projection0, proj.func] = [proj.func, opts.projections[k]()]
+		proj.name = k
 		svg.selectAll('path').transition()
 			.duration(750)
-			.attrTween('d', projectionTween(projection0, projection))
+			.attrTween('d', projectionTween(projection0, proj.func))
 
 	menu_opts = d3.select('#projection-menu')
 			.style('display', 'block')
@@ -172,7 +190,7 @@ do ->
 			.text((d) -> d.name)
 
 	menu_opts
-			.attr('selected', (d) -> if d.name == projection_name then true else null)
+			.attr('selected', (d) -> if d.name == proj.name then true else null)
 
 
 ## Geo trace and conntrack classes
@@ -235,7 +253,7 @@ class Tracer extends events.EventEmitter
 				if hop.number == 1 or not hop.ip then return
 				geo = geoip.lookup(hop.ip)
 				if not geo
-					label_buff.push(label_addr)
+					label_buff.push(hop.ip)
 					return
 				label = hop_label_format(hop)
 				loc = if geo.city then "#{geo.city}, #{geo.country}" else "#{geo.country}"
@@ -279,7 +297,7 @@ class Tracer extends events.EventEmitter
 				delete @conn.pending[ip]
 
 			.on 'conn_add', (ip) ->
-				if @conn.active[ip] then return
+				if @conn.active[ip] or @conn.pending[ip] then return
 				hops = @conn.cache.get(ip)
 				if hops
 					@emit('trace', ip, hops)
@@ -339,8 +357,9 @@ class ConntrackSS extends events.EventEmitter
 					if line.length == 6
 						[props, line] = [line[line.length-1], line[...-1]]
 					[proto, q_recv, q_send, s_local, s_remote] = line
-					[s_local, s_remote] =\
-						(s.match(/^(.+):(\d+)$/)[1..2] for s in [s_local, s_remote])
+					[s_local, s_remote] = for s in [s_local, s_remote]
+						[ip, port] = s.match(/^(.+):(\d+)$/)[1..2]
+						[ip.replace(/^::ffff:/, ''), port]
 
 					if props
 						try
@@ -367,6 +386,7 @@ class ConntrackSS extends events.EventEmitter
 						props: props
 					ss_buff.push(conn)
 					# XXX: conntrack should be used with conn_add/conn_del interface
+					# XXX: add conn_del here for compat, drop conn_list special-case for polling things... maybe
 					# self.emit('conn_add', conn)
 
 			.setEncoding('utf8')
@@ -390,14 +410,6 @@ class ConntrackSS extends events.EventEmitter
 
 ## Main loop
 
-o = projection(opts.defaults.source.reverse())
-svg.append('svg:circle')
-	.attr('class','point')
-	.attr('cx', o[0])
-	.attr('cy', o[1])
-	.attr('r', 4)
-	.attr('title', 'source')
-
 do ->
 	tracer = Tracer.in_domain()
 	ct = ConntrackSS.in_domain()
@@ -412,7 +424,48 @@ do ->
 				tracer.conn_add(conn.remote.addr)
 			.on 'conn_del', (conn) ->
 				tracer.conn_del(conn.remote.addr)
-	ct.start(opts.defaults.conntrack_poll_interval)
 
-	# tracer.on 'trace', (ip, hops) ->
-	# 	dump(hops, "Trace to #{ip}")
+	source = label: 'source', geo: opts.defaults.source
+	trace_line = d3.svg.line()
+		.x((d) -> d[0])
+		.y((d) -> d[1])
+
+	draw_traces = (traces) ->
+		data = ( {ip: ip, trace: trace}\
+			for own ip, trace of traces\
+			when trace.filter((d) -> d.geo).length != 0 )
+
+		traces = proj.traces.selectAll('path.trace')
+			.data(data, (d) -> d.ip)
+		traces.enter().append('path')
+			.datum((d) ->
+				for node in d3.merge([[source], d.trace])
+					assert(node.geo, [node, d.trace])
+					proj.func(node.geo[..].reverse()))
+			.attr('class', 'trace')
+			.attr('d', trace_line)
+		traces.exit().remove()
+
+		marker_traces = proj.markers.selectAll('g').data(data, (d) -> d.ip)
+		marker_traces.enter().append('g')
+		marker_traces.exit().remove()
+
+		markers = marker_traces.selectAll('circle').data((d) -> d.trace)
+		markers.enter().append('circle')
+			.datum((d) -> proj.func(d.geo[..].reverse()))
+			.attr('class','point')
+			.attr('cx', (d) -> d[0])
+			.attr('cy', (d) -> d[1])
+			.attr('r', 2)
+		markers.exit().remove()
+
+	# draw_traces(geo_mock)
+
+	# ct.poll()
+	# setTimeout((-> util.debug(JSON.stringify(tracer.conn.active))), 3000)
+	# setTimeout((-> draw_traces(tracer.conn.active)), 3000)
+
+	ct.start(opts.defaults.conntrack_poll_interval)
+	setInterval(
+		(-> draw_traces(tracer.conn.active)),
+		opts.defaults.draw_interval * 1000 )

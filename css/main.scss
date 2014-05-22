@@ -16,30 +16,28 @@ svg {
 		left: 50%;
 	}
 
+	fill: none;
+
 	.stroke {
-		fill: none;
 		stroke: #000;
 		stroke-width: 3px;
 	}
+	.fill { fill: #fff; }
 
-	.fill {
-		fill: #fff;
-	}
+	.land { fill: #ccc; }
 
 	.graticule {
-		fill: none;
 		stroke: #777;
 		stroke-width: .5px;
 		stroke-opacity: .5;
 	}
 
-	.land {
-		fill: #ccc;
+	.point {
+		fill: #000;
+	}
+	.trace {
+		stroke: #a00;
+		stroke-width: 1px;
 	}
 
-	.boundary {
-		fill: none;
-		stroke: #fff;
-		stroke-width: .5px;
-	}
 }
