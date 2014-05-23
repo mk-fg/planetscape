@@ -426,10 +426,8 @@ do ->
 				tracer.conn_del(conn.remote.addr)
 
 	# XXX: such straight lines are incorrect in pretty much any projection, fix that
-	trace_line = d3.svg.line()
-		.x((d) -> d[0])
-		.y((d) -> d[1])
-	source = label: 'source', geo: opts.defaults.source
+	trace_path = d3.geo.path().projection(proj.func)
+	source = opts.defaults.source
 
 	draw_traces = (traces) ->
 		data = ( {ip: ip, trace: trace}\
@@ -440,11 +438,17 @@ do ->
 			.data(data, (d) -> d.ip)
 		traces.enter().append('path')
 			.datum((d) ->
-				for node in d3.merge([[source], d.trace])
-					assert(node.geo, [node, d.trace])
-					proj.func(node.geo[..].reverse()))
+				type: 'MultiLineString'
+				coordinates: do ->
+					p0 = source[..].reverse()
+					for node in d.trace
+						assert(node.geo, [node, d.trace])
+						p1 = node.geo[..].reverse()
+						[p0, line] = [p1, [p0, p1]]
+						line)
 			.attr('class', 'trace')
-			.attr('d', trace_line)
+			.attr('d', trace_path)
+
 		traces.exit().remove()
 
 		marker_traces = proj.markers.selectAll('g').data(data, (d) -> d.ip)

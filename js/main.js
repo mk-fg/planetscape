@@ -656,7 +656,7 @@
   })(events.EventEmitter);
 
   (function() {
-    var ct, draw_traces, source, trace_line, tracer;
+    var ct, draw_traces, source, trace_path, tracer;
     tracer = Tracer.in_domain();
     ct = ConntrackSS.in_domain();
     if (ct.polling) {
@@ -679,15 +679,8 @@
         return tracer.conn_del(conn.remote.addr);
       });
     }
-    source = {
-      label: 'source',
-      geo: opts.defaults.source
-    };
-    trace_line = d3.svg.line().x(function(d) {
-      return d[0];
-    }).y(function(d) {
-      return d[1];
-    });
+    trace_path = d3.geo.path().projection(proj.func);
+    source = opts.defaults.source;
     draw_traces = function(traces) {
       var data, ip, marker_traces, markers, trace;
       data = (function() {
@@ -711,16 +704,24 @@
         return d.ip;
       });
       traces.enter().append('path').datum(function(d) {
-        var node, _i, _len, _ref, _results;
-        _ref = d3.merge([[source], d.trace]);
-        _results = [];
-        for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-          node = _ref[_i];
-          assert(node.geo, [node, d.trace]);
-          _results.push(proj.func(node.geo.slice(0).reverse()));
-        }
-        return _results;
-      }).attr('class', 'trace').attr('d', trace_line);
+        return {
+          type: 'MultiLineString',
+          coordinates: (function() {
+            var line, node, p0, p1, _i, _len, _ref, _ref1, _results;
+            p0 = source.slice(0).reverse();
+            _ref = d.trace;
+            _results = [];
+            for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+              node = _ref[_i];
+              assert(node.geo, [node, d.trace]);
+              p1 = node.geo.slice(0).reverse();
+              _ref1 = [p1, [p0, p1]], p0 = _ref1[0], line = _ref1[1];
+              _results.push(line);
+            }
+            return _results;
+          })()
+        };
+      }).attr('class', 'trace').attr('d', trace_path);
       traces.exit().remove();
       marker_traces = proj.markers.selectAll('g').data(data, function(d) {
         return d.ip;
