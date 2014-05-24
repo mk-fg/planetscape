@@ -1,32 +1,19 @@
 
 'use strict'
-util = require('util')
-throw_err = (msg) -> throw new Error(msg or 'Unspecified Error')
-assert = (condition, msg) ->
-	# console.assert is kinda useless, as it doesn't actually stop the script
-	if not condition
-		if msg? and typeof(msg) != 'string'
-			dump(msg, 'Error Data Context')
-		throw_err(msg or 'Assertion failed')
-dump = (data, label='unlabeled object', opts={}) ->
-	if not opts.colors? then opts.colors = true
-	if not opts.depth? then opts.depth = 4
-	util.debug("#{label}\n" + util.inspect(data, opts))
-
 
 # require('nw.gui').Window.get().showDevTools()
 
+u = require('./js/utils')
+conntrace = require('./js/conntrace')
+
 path = require('path')
 fs = require('fs')
-domain = require('domain')
-events = require('events')
-child_process = require('child_process')
-stream = require('stream')
+util = require('util')
 
-Mtr = require('mtr').Mtr
-geoip = require('geoip-lite')
 yaml = require('js-yaml')
 
+
+## Configuration
 
 opts =
 
@@ -117,7 +104,7 @@ do ->
 	while path_conf_order.length
 		[path_conf, path_conf_order] = [path_conf_order[0], path_conf_order[1..]]
 		if path_conf.match(/^~\//)
-			assert(path_home, 'Unable to get user home path from env')
+			u.assert(path_home, 'Unable to get user home path from env')
 			path_conf = path.join(path_home, path_conf.substr(2))
 		path_conf = path.resolve(path_conf)
 		# console.log("Loading config: #{path_conf}")
@@ -246,234 +233,11 @@ do ->
 			.attr('selected', (d) -> if d.name == proj.name then true else null)
 
 
-## Geo trace and conntrack classes
-
-# setInterval interface is beyond atrocious
-add_task = (interval, cb) -> setInterval(cb, interval*1000)
-add_task_now = (interval, cb) ->
-	cb()
-	return add_task(interval, cb)
-
-class Cache extends events.EventEmitter
-
-	constructor: (data, @lwm=300, hwm_k=1.5) ->
-		super()
-		[@data, @hwm] = [d3.map(), @lwm * hwm_k]
-		if data
-			ts = (new Date()).getTime()
-			for own k,v of data
-				@set(k, v, ts)
-		@on('set', @clean)
-
-	has: (k) -> @data.has(k)
-
-	get: (k, ts) ->
-		v = @data.get(k)
-		if not v? then return v
-		if not ts?
-			ts = (new Date()).getTime()
-		v.ts = ts
-		@emit('get', k, v.v, ts)
-		return v.v
-
-	set: (k, v, ts) ->
-		if not ts?
-			ts = (new Date()).getTime()
-		@data.set(ts: ts, v: v)
-		@emit('set', k, v, ts)
-
-	clean: ->
-		if @data.size() <= @hwm then return
-		for e in @data.entries().sort((a, b) -> a.ts - b.ts)[..@lwm]
-			@data.remove(e.key)
-
-
-class Tracer extends events.EventEmitter
-
-	mtr_cycles: 1
-
-	geotrace: (ip) ->
-		mtr = new Mtr(ip, reportCycles: @mtr_cycles)
-		[self, hops] = [this, []]
-		[link_length, last_hop, label_buff] = [0, null, []]
-
-		hop_label_format = (hop) ->
-			label = hop.ip # XXX: maybe use hostnames here
-			if label_buff.length
-				label_buff.push(label)
-				label = label_buff.join(' -> ')
-				label_buff = []
-			return label
-
-		mtr
-			.on 'hop', (hop) ->
-				link_length += 1
-				last_hop = hop
-				if hop.number == 1 or not hop.ip then return
-				geo = geoip.lookup(hop.ip)
-				if not geo
-					label_buff.push(hop.ip)
-					return
-				label = hop_label_format(hop)
-				loc = if geo.city then "#{geo.city}, #{geo.country}" else "#{geo.country}"
-				hops.push
-					label: "#{label} (#{loc})"
-					geo: geo.ll
-					link: link_length # XXX: calculate from rtt or aggregate count thru this IP/range
-				[link_length, last_hop] = [0, null]
-
-			.on 'end', ->
-				if last_hop
-					label = hop_label_format(last_hop)
-					hops.push
-						label: "#{label}"
-						geo: null
-						link: link_length
-				self.emit('trace', ip, hops)
-
-			.on 'error', (err) ->
-				console.log('traceroute error (ip: #{ip}): #{err.message}')
-
-			.traceroute()
-
-	conn_add: (ip) -> @emit('conn_add', ip)
-	conn_del: (ip) -> @emit('conn_del', ip)
-	conn_list: (ip_list) -> @emit('conn_list', ip_list)
-
-	constructor: ->
-		super()
-
-		@conn =
-			active: {}
-			pending: {}
-			cache: new Cache()
-
-		this
-			.on 'trace', (ip, hops) ->
-				if not @conn.pending[ip] then return
-				@conn.active[ip] = hops
-				@conn.cache.set(ip, hops)
-				delete @conn.pending[ip]
-
-			.on 'conn_add', (ip) ->
-				if @conn.active[ip] or @conn.pending[ip] then return
-				hops = @conn.cache.get(ip)
-				if hops
-					@emit('trace', ip, hops)
-				else
-					@conn.pending[ip] = true
-					@geotrace(ip)
-
-			.on 'conn_del', (ip) ->
-				if not @conn.active[ip] then return
-				delete @conn.active[ip]
-				delete @conn.pending[ip]
-
-			.on 'conn_list', (ip_list) ->
-				active = {}
-				for own ip, hops of @conn.active
-					active[k] = v
-				for ip in ip_list
-					if active[ip]
-						delete active[ip]
-						continue
-					@conn_add(ip)
-				for own ip, hops of active
-					@conn_del(ip)
-
-	@in_domain: (d) ->
-		if not d then d = domain.create()
-		return d.run(-> new Tracer())
-
-
-class ConntrackSS extends events.EventEmitter
-
-	polling: true
-
-	poll: ->
-		self = this
-
-		ss = child_process.spawn 'ss',
-			['-np', '-A', 'inet', 'state', 'established'],
-			stdio: ['ignore', 'pipe', process.stderr]
-		[ss_out, ss_err, ss_header, ss_buff] = ['', '', true, []]
-
-		ss.stdout
-
-			.on 'end', ->
-				self.emit('conn_list', ss_buff)
-
-			.on 'data', (d) ->
-				ss_out += d
-				lines = ss_out.split('\n')
-				if lines.length < 2 then return
-				[ss_out, lines] = [lines[lines.length-1], lines[...-1]]
-				if ss_header then lines = lines[1..]
-
-				for line in lines
-					line = line.split(/\s+/)
-					assert(line.length in [5, 6])
-					if line.length == 6
-						[props, line] = [line[line.length-1], line[...-1]]
-					[proto, q_recv, q_send, s_local, s_remote] = line
-					[s_local, s_remote] = for s in [s_local, s_remote]
-						[ip, port] = s.match(/^(.+):(\d+)$/)[1..2]
-						[ip.replace(/^::ffff:/, ''), port]
-
-					if props
-						try
-							props = users: (
-								p = props.match(/^users:\((.*)\)$/)
-								assert(p, "Can't match 'users:...' from: #{props}")
-								re = /\("((?:[^\\"]|\\.)*)",(\d+),(\d+)\)(?:,|$)/g # "-quoted voodoo
-								while m = re.exec(p[1])
-									cmd: m[1], pid: parseInt(m[2]), fd: parseInt(m[3]) )
-						catch e
-							throw_err("Failed to parse prop-string `#{props}': #{e}")
-
-					conn =
-						proto: proto
-						queues:
-							recv: parseInt(q_recv)
-							send: parseInt(q_send)
-						local:
-							addr: s_local[0]
-							port: parseInt(s_local[1])
-						remote:
-							addr: s_remote[0]
-							port: parseInt(s_remote[1])
-						props: props
-					ss_buff.push(conn)
-					# XXX: conntrack should be used with conn_add/conn_del interface
-					# XXX: add conn_del here for compat, drop conn_list special-case for polling things... maybe
-					# self.emit('conn_add', conn)
-
-			.setEncoding('utf8')
-
-		ss
-			.on 'exit', (code, sig) ->
-				if not code? or code != 0 or sig
-					throw_err("ss - exit with error: #{code}, #{sig}")
-			.on 'error', (err) -> throw_err("ss - failed to run: #{err}")
-
-	start: (poll_interval, now=true) ->
-		assert(not @timer, @timer)
-		@timer = do (self=@) ->
-			scheduler = if now then add_task_now else add_task
-			scheduler poll_interval, -> self.poll()
-
-	stop: -> @timer = @timer and clearInterval(@timer) and null
-
-	@in_domain: (d) ->
-		if not d then d = domain.create()
-		return d.run(-> new ConntrackSS())
-
-
 ## Main loop
 
 do ->
-	tracer = Tracer.in_domain()
-	ct = ConntrackSS.in_domain()
+	tracer = conntrace.Tracer.in_domain()
+	ct = conntrace.ConntrackSS.in_domain()
 
 	# XXX: use other connection metadata (e.g. cmd/port for color)
 	if ct.polling
@@ -502,7 +266,7 @@ do ->
 				coordinates: do ->
 					p0 = source[..].reverse()
 					for node in d.trace
-						assert(node.geo, [node, d.trace])
+						u.assert(node.geo, [node, d.trace])
 						p1 = node.geo[..].reverse()
 						[p0, line] = [p1, [p0, p1]]
 						line)
@@ -531,7 +295,7 @@ do ->
 			json = fs.readFileSync(opts.config.debug.traces.load_from)
 			tracer.conn.active = JSON.parse(json)
 
-	add_task_now opts.config.updates.redraw, ->
+	u.add_task_now opts.config.updates.redraw, ->
 		traces = tracer.conn.active
 		if opts.config.debug.traces.dump
 			util.debug(JSON.stringify(traces))
