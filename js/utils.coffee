@@ -27,8 +27,20 @@ add_task_now = (interval, cb) ->
 	return add_task(interval, cb)
 
 
+deep_freeze = (layer) ->
+	if layer? and typeof(layer) == 'object'
+		if Array.isArray(layer)
+			for v in layer
+				deep_freeze(v)
+		else
+			for own k, v of layer
+				deep_freeze(v)
+		Object.freeze(layer)
+
+
 module.exports.throw_err = throw_err
 module.exports.assert = assert
 module.exports.dump = dump
 module.exports.add_task = add_task
 module.exports.add_task_now = add_task_now
+module.exports.deep_freeze = deep_freeze

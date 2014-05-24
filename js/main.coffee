@@ -1,3 +1,5 @@
+## This file is "not quite" node.js, but all things require()'ed here are
+# see https://github.com/rogerwang/node-webkit/wiki/Differences-of-JavaScript-contexts
 
 'use strict'
 
@@ -78,8 +80,8 @@ do ->
 				p = p0().rotate([0, 0, 0]).center([0, 0])
 				p.scale(p.scale() * scale_factor)
 					.translate(v * scale_factor for v in p.translate())
-
 	opts.config = config.load_conf(opts.config_path_base, process.env['PSC_CONF'])
+	u.deep_freeze(opts)
 
 
 ## Projection

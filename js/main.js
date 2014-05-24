@@ -177,7 +177,8 @@
       p0 = _ref[k];
       _fn(p0);
     }
-    return opts.config = config.load_conf(opts.config_path_base, process.env['PSC_CONF']);
+    opts.config = config.load_conf(opts.config_path_base, process.env['PSC_CONF']);
+    return u.deep_freeze(opts);
   })();
 
   proj = {
