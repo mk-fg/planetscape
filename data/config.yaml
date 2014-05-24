@@ -9,6 +9,10 @@
 #  can be overidden by setting PSC_CONF env var
 extension: ~/.planetscape.yaml
 
+# Same as extension, but will be applied prior to this config file
+# Processed before extensions, if both are present in the same file
+base:
+
 projection:
   name: 'Equirectangular (Plate Carrée)'
   source: [56.833333, 60.583333]

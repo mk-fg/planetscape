@@ -190,7 +190,7 @@
   };
 
   (function() {
-    var conf_merge, err, fs, k, p0, path, path_conf, path_home, scale_factor, yaml, _fn, _ref, _ref1, _results;
+    var conf, conf_merge, err, fs, k, p0, path, path_conf, path_conf_bases, path_conf_order, path_home, scale_factor, yaml, _fn, _ref, _ref1, _ref2, _ref3, _results;
     scale_factor = Math.min(opts.w / 960, opts.h / 500);
     _ref = opts.projections;
     _fn = function(p0) {
@@ -217,23 +217,28 @@
     path_home = process.env[(process.platform === 'win32' ? 'USERPROFILE' : 'HOME')];
     conf_merge = function(conf, ext) {
       var v;
-      for (k in ext) {
-        if (!__hasProp.call(ext, k)) continue;
-        v = ext[k];
-        if (k in conf) {
-          if (Array.isArray(conf[k]) && Array.isArray(v)) {
-            v = d3.merge([conf[k], v]);
-          } else if (typeof conf[k] === 'object' && typeof v === 'object') {
-            v = conf_merge(conf[k], v);
+      if (!conf) {
+        conf = ext;
+      } else {
+        for (k in ext) {
+          if (!__hasProp.call(ext, k)) continue;
+          v = ext[k];
+          if (k in conf) {
+            if (Array.isArray(conf[k]) && Array.isArray(v)) {
+              v = d3.merge([conf[k], v]);
+            } else if (typeof conf[k] === 'object' && typeof v === 'object') {
+              v = conf_merge(conf[k], v);
+            }
           }
+          conf[k] = v;
         }
-        conf[k] = v;
       }
       return conf;
     };
-    path_conf = opts.config_path_base;
+    _ref2 = [[opts.config_path_base], d3.set()], path_conf_order = _ref2[0], path_conf_bases = _ref2[1];
     _results = [];
-    while (path_conf) {
+    while (path_conf_order.length) {
+      _ref3 = [path_conf_order[0], path_conf_order.slice(1)], path_conf = _ref3[0], path_conf_order = _ref3[1];
       if (path_conf.match(/^~\//)) {
         assert(path_home, 'Unable to get user home path from env');
         path_conf = path.join(path_home, path_conf.substr(2));
@@ -242,14 +247,13 @@
       try {
         path_conf = fs.realpathSync(path_conf);
       } catch (_error) {
-        break;
+        continue;
       }
       if (__indexOf.call(opts.config_path, path_conf) >= 0) {
-        break;
+        continue;
       }
-      opts.config_path.push(path_conf);
       try {
-        opts.config = yaml.safeLoad(fs.readFileSync(path_conf, {
+        conf = yaml.safeLoad(fs.readFileSync(path_conf, {
           encoding: 'utf-8'
         }), {
           filename: path_conf,
@@ -261,11 +265,21 @@
         util.error("Failed to process configuration file: " + path_conf + "\n  " + err);
         process.exit(1);
       }
+      if (conf.base && !path_conf_bases.has(conf.base)) {
+        path_conf_order = d3.merge([[conf.base, path_conf], path_conf_order]);
+        path_conf_bases.add(conf.base);
+        continue;
+      }
+      opts.config = conf_merge(opts.config, conf);
+      opts.config_path.push(path_conf);
       if (process.env['PSC_CONF']) {
         opts.config.extension = process.env['PSC_CONF'];
-        process.env['PSC_CONF'] = null;
+        delete process.env['PSC_CONF'];
       }
-      path_conf = opts.config.extension || null;
+      if (opts.config.extension) {
+        path_conf_order.unshift(opts.config.extension);
+      }
+      delete opts.config.base;
       _results.push(delete opts.config.extension);
     }
     return _results;
