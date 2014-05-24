@@ -16,6 +16,8 @@ dump = (data, label='unlabeled object', opts={}) ->
 
 # require('nw.gui').Window.get().showDevTools()
 
+path = require('path')
+fs = require('fs')
 domain = require('domain')
 events = require('events')
 child_process = require('child_process')
@@ -23,6 +25,7 @@ stream = require('stream')
 
 Mtr = require('mtr').Mtr
 geoip = require('geoip-lite')
+yaml = require('js-yaml')
 
 
 opts =
@@ -93,7 +96,6 @@ do ->
 					.translate(v * scale_factor for v in p.translate())
 
 	# Load/merge config file(s)
-	[path, fs, yaml] = ['path', 'fs', 'js-yaml'].map(require)
 	path_home = process.env[(
 		if process.platform == 'win32'
 		then 'USERPROFILE' else 'HOME' )]
@@ -245,6 +247,12 @@ do ->
 
 
 ## Geo trace and conntrack classes
+
+# setInterval interface is beyond atrocious
+add_task = (interval, cb) -> setInterval(cb, interval*1000)
+add_task_now = (interval, cb) ->
+	cb()
+	return add_task(interval, cb)
 
 class Cache extends events.EventEmitter
 
@@ -448,9 +456,11 @@ class ConntrackSS extends events.EventEmitter
 					throw_err("ss - exit with error: #{code}, #{sig}")
 			.on 'error', (err) -> throw_err("ss - failed to run: #{err}")
 
-	start: (poll_interval) ->
+	start: (poll_interval, now=true) ->
 		assert(not @timer, @timer)
-		@timer = do (s=@) -> setInterval((-> s.poll()), poll_interval * 1000)
+		@timer = do (self=@) ->
+			scheduler = if now then add_task_now else add_task
+			scheduler poll_interval, -> self.poll()
 
 	stop: -> @timer = @timer and clearInterval(@timer) and null
 
@@ -514,13 +524,15 @@ do ->
 			.attr('r', 2)
 		markers.exit().remove()
 
-	# draw_traces(geo_mock)
+	if not opts.config.debug.traces.load_from
+		ct.start(opts.config.updates.conntrack_poll)
+	else
+		do ->
+			json = fs.readFileSync(opts.config.debug.traces.load_from)
+			tracer.conn.active = JSON.parse(json)
 
-	# ct.poll()
-	# setTimeout((-> util.debug(JSON.stringify(tracer.conn.active))), 3000)
-	# setTimeout((-> draw_traces(tracer.conn.active)), 3000)
-
-	ct.start(opts.config.updates.conntrack_poll)
-	setInterval(
-		(-> draw_traces(tracer.conn.active)),
-		opts.config.updates.redraw * 1000 )
+	add_task_now opts.config.updates.redraw, ->
+		traces = tracer.conn.active
+		if opts.config.debug.traces.dump
+			util.debug(JSON.stringify(traces))
+		draw_traces(traces)

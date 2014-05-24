@@ -15,14 +15,18 @@ base:
 
 projection:
   name: 'Equirectangular (Plate Carrée)'
-  source: [56.833333, 60.583333]
+  source: [56.833333, 60.583333] # lat/lon of traces' origin point
 
 updates:
-  conntrack_poll: 5
-  redraw: 3
+  conntrack_poll: 5 # sec between polling connection table
+  redraw: 3 # sec between updating map with new traces (if any)
+  # XXX: replace "redraw" with reactive logic, with some lock vs concurrency
   # XXX: maybe some rate-limiting for traceroute stuff
 
-# debug:
-#   traces:
-#     dump: false
-#     load_from: null
+debug:
+  traces:
+    # Dump json of trace geo data to stdout on each redraw routine
+    dump: false
+    # Path to json file (same structure as in "dump" above)
+    #  to load trace geo data from, instead of tracing actual connections
+    load_from: null
