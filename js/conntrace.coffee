@@ -52,7 +52,7 @@ class Tracer extends events.EventEmitter
 	mtr_cycles: 1
 
 	geotrace: (ip) ->
-		mtr = new mtr.Mtr(ip, reportCycles: @mtr_cycles)
+		trace = new mtr.Mtr(ip, reportCycles: @mtr_cycles)
 		[self, hops] = [this, []]
 		[link_length, last_hop, label_buff] = [0, null, []]
 
@@ -64,7 +64,7 @@ class Tracer extends events.EventEmitter
 				label_buff = []
 			return label
 
-		mtr
+		trace
 			.on 'hop', (hop) ->
 				link_length += 1
 				last_hop = hop

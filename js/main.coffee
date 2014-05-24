@@ -12,14 +12,9 @@ util = require('util')
 
 
 ## Configuration
+# All this stuff is static after init
 
 opts =
-
-	w: window.innerWidth * 0.9
-	h: window.innerHeight * 0.9
-
-	world: require('./data/world-110m.json')
-
 	projections:
 		'Aitoff': -> d3.geo.aitoff()
 		'Albers': -> d3.geo.albers().scale(145).parallels([20, 50])
@@ -66,6 +61,11 @@ opts =
 		'van der Grinten': -> d3.geo.vanDerGrinten().scale(75)
 		'van der Grinten IV': -> d3.geo.vanDerGrinten4().scale(120)
 
+	world: require('./data/world-110m.json')
+
+	w: window.innerWidth * 0.9
+	h: window.innerHeight * 0.9
+
 	config_path_base: './data/config.yaml'
 	config: null
 
@@ -88,9 +88,6 @@ proj =
 	name: opts.config.projection.name
 	func: null
 	path: null
-
-	list: (k for k, v of opts.projections)
-	graticule: d3.geo.graticule()
 
 	traces: null
 	markers: null
@@ -122,7 +119,7 @@ svg.append('use')
 	.attr('xlink:href', '#sphere')
 
 svg.append('path')
-	.datum(proj.graticule)
+	.datum(d3.geo.graticule())
 	.attr('class', 'graticule')
 	.attr('d', proj.path)
 
@@ -140,12 +137,14 @@ proj.markers = svg.append('g')
 ## Projection options menu
 
 do ->
-	projectionTween = (projection0, projection1) ->
+	proj_names = (k for k, v of opts.projections)
+
+	proj_tween = (proj0, proj1) ->
 		(d) ->
 			project = (λ, φ) ->
 				λ *= 180 / Math.PI
 				φ *= 180 / Math.PI
-				[p0, p1] = [projection0([λ, φ]), projection1([λ, φ])]
+				[p0, p1] = [proj0([λ, φ]), proj1([λ, φ])]
 				[(1 - t) * p0[0] + t * p1[0], (1 - t) * - p0[1] + t * -p1[1]]
 			t = 0
 			proj.func = d3.geo.projection(project)
@@ -157,24 +156,22 @@ do ->
 				proj.path(d)
 
 	update = ->
-		k = proj.list[this.selectedIndex]
-		[projection0, proj.func] = [proj.func, opts.projections[k]()]
+		k = proj_names[this.selectedIndex]
+		[proj0, proj.func] = [proj.func, opts.projections[k]()]
 		proj.name = k
 		svg.selectAll('path').transition()
 			.duration(750)
-			.attrTween('d', projectionTween(projection0, proj.func))
+			.attrTween('d', proj_tween(proj0, proj.func))
 
 	menu_opts = d3.select('#projection-menu')
 			.style('display', 'block')
 			.on('change', update)
 		.selectAll('option')
-			.data({name: k, projection: v()} for k, v of opts.projections)
-
+			.data(proj_names)
 	menu_opts.enter().append('option')
-			.text((d) -> d.name)
-
+		.text((d) -> d)
 	menu_opts
-			.attr('selected', (d) -> if d.name == proj.name then true else null)
+		.attr('selected', (d) -> if d == proj.name then true else null)
 
 
 ## Main loop

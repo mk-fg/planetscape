@@ -104,8 +104,8 @@
     Tracer.prototype.mtr_cycles = 1;
 
     Tracer.prototype.geotrace = function(ip) {
-      var hop_label_format, hops, label_buff, last_hop, link_length, self, _ref, _ref1;
-      mtr = new mtr.Mtr(ip, {
+      var hop_label_format, hops, label_buff, last_hop, link_length, self, trace, _ref, _ref1;
+      trace = new mtr.Mtr(ip, {
         reportCycles: this.mtr_cycles
       });
       _ref = [this, []], self = _ref[0], hops = _ref[1];
@@ -120,7 +120,7 @@
         }
         return label;
       };
-      return mtr.on('hop', function(hop) {
+      return trace.on('hop', function(hop) {
         var geo, label, loc, _ref2;
         link_length += 1;
         last_hop = hop;
