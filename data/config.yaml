@@ -1,0 +1,24 @@
+### Default (baseline) configuration parameters.
+### DO NOT change this config, instead place overlay
+###  one at a path specified as "extension" parameter instead.
+
+# Which config (YAML) file to load next
+# Can be used in configs which are already an extension of others
+# Same paths encountered again or non-existing paths will be skipped
+# Initial extension config here (and only here)
+#  can be overidden by setting PSC_CONF env var
+extension: ~/.planetscape.yaml
+
+projection:
+  name: 'Equirectangular (Plate Carrée)'
+  source: [56.833333, 60.583333]
+
+updates:
+  conntrack_poll: 5
+  redraw: 3
+  # XXX: maybe some rate-limiting for traceroute stuff
+
+# debug:
+#   traces:
+#     dump: false
+#     load_from: null

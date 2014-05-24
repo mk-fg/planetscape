@@ -3,6 +3,7 @@
   'use strict';
   var Cache, ConntrackSS, Mtr, Tracer, assert, child_process, domain, dump, events, geoip, k, opts, proj, stream, svg, throw_err, util, v,
     __hasProp = {}.hasOwnProperty,
+    __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
     __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
 
   util = require('util');
@@ -183,43 +184,95 @@
         return d3.geo.vanDerGrinten4().scale(120);
       }
     },
-    defaults: {
-      source: [56.833333, 60.583333],
-      projection: 'Equirectangular (Plate Carrée)',
-      conntrack_poll_interval: 5,
-      draw_interval: 3
-    }
+    config_path_base: './data/config.yaml',
+    config_path: [],
+    config: null
   };
 
   (function() {
-    var k, p0, scale_factor, _ref, _results;
+    var conf_merge, err, fs, k, p0, path, path_conf, path_home, scale_factor, yaml, _fn, _ref, _ref1, _results;
     scale_factor = Math.min(opts.w / 960, opts.h / 500);
     _ref = opts.projections;
-    _results = [];
+    _fn = function(p0) {
+      return opts.projections[k] = function() {
+        var p, v;
+        p = p0().rotate([0, 0, 0]).center([0, 0]);
+        return p.scale(p.scale() * scale_factor).translate((function() {
+          var _i, _len, _ref1, _results;
+          _ref1 = p.translate();
+          _results = [];
+          for (_i = 0, _len = _ref1.length; _i < _len; _i++) {
+            v = _ref1[_i];
+            _results.push(v * scale_factor);
+          }
+          return _results;
+        })());
+      };
+    };
     for (k in _ref) {
       p0 = _ref[k];
-      _results.push((function(p0) {
-        return opts.projections[k] = function() {
-          var p, v;
-          p = p0().rotate([0, 0, 0]).center([0, 0]);
-          return p.scale(p.scale() * scale_factor).translate((function() {
-            var _i, _len, _ref1, _results1;
-            _ref1 = p.translate();
-            _results1 = [];
-            for (_i = 0, _len = _ref1.length; _i < _len; _i++) {
-              v = _ref1[_i];
-              _results1.push(v * scale_factor);
-            }
-            return _results1;
-          })());
-        };
-      })(p0));
+      _fn(p0);
+    }
+    _ref1 = ['path', 'fs', 'js-yaml'].map(require), path = _ref1[0], fs = _ref1[1], yaml = _ref1[2];
+    path_home = process.env[(process.platform === 'win32' ? 'USERPROFILE' : 'HOME')];
+    conf_merge = function(conf, ext) {
+      var v;
+      for (k in ext) {
+        if (!__hasProp.call(ext, k)) continue;
+        v = ext[k];
+        if (k in conf) {
+          if (Array.isArray(conf[k]) && Array.isArray(v)) {
+            v = d3.merge([conf[k], v]);
+          } else if (typeof conf[k] === 'object' && typeof v === 'object') {
+            v = conf_merge(conf[k], v);
+          }
+        }
+        conf[k] = v;
+      }
+      return conf;
+    };
+    path_conf = opts.config_path_base;
+    _results = [];
+    while (path_conf) {
+      if (path_conf.match(/^~\//)) {
+        assert(path_home, 'Unable to get user home path from env');
+        path_conf = path.join(path_home, path_conf.substr(2));
+      }
+      path_conf = path.resolve(path_conf);
+      try {
+        path_conf = fs.realpathSync(path_conf);
+      } catch (_error) {
+        break;
+      }
+      if (__indexOf.call(opts.config_path, path_conf) >= 0) {
+        break;
+      }
+      opts.config_path.push(path_conf);
+      try {
+        opts.config = yaml.safeLoad(fs.readFileSync(path_conf, {
+          encoding: 'utf-8'
+        }), {
+          filename: path_conf,
+          strict: true,
+          schema: yaml.CORE_SCHEMA
+        });
+      } catch (_error) {
+        err = _error;
+        util.error("Failed to process configuration file: " + path_conf + "\n  " + err);
+        process.exit(1);
+      }
+      if (process.env['PSC_CONF']) {
+        opts.config.extension = process.env['PSC_CONF'];
+        process.env['PSC_CONF'] = null;
+      }
+      path_conf = opts.config.extension || null;
+      _results.push(delete opts.config.extension);
     }
     return _results;
   })();
 
   proj = {
-    name: opts.defaults.projection,
+    name: opts.config.projection.name,
     func: null,
     path: null,
     list: (function() {
@@ -680,7 +733,7 @@
       });
     }
     trace_path = d3.geo.path().projection(proj.func);
-    source = opts.defaults.source;
+    source = opts.config.projection.source;
     draw_traces = function(traces) {
       var data, ip, marker_traces, markers, trace;
       data = (function() {
@@ -740,10 +793,10 @@
       }).attr('r', 2);
       return markers.exit().remove();
     };
-    ct.start(opts.defaults.conntrack_poll_interval);
+    ct.start(opts.config.updates.conntrack_poll);
     return setInterval((function() {
       return draw_traces(tracer.conn.active);
-    }), opts.defaults.draw_interval * 1000);
+    }), opts.config.updates.redraw * 1000);
   })();
 
 }).call(this);

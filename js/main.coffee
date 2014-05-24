@@ -78,16 +78,12 @@ opts =
 		'van der Grinten': -> d3.geo.vanDerGrinten().scale(75)
 		'van der Grinten IV': -> d3.geo.vanDerGrinten4().scale(120)
 
-	defaults:
-		# XXX: configurable somehow (cli?)
-		source: [56.833333, 60.583333]
-		projection: 'Equirectangular (Plate Carrée)'
-		conntrack_poll_interval: 5
-		draw_interval: 3
-		# XXX: maybe some rate-limiting for traceroute stuff
+	config_path_base: './data/config.yaml'
+	config_path: [] # populated with other loaded configs
+	config: null
 
-# Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
 do ->
+	# Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
 	scale_factor = Math.min(opts.w / 960, opts.h / 500)
 	for k, p0 of opts.projections
 		do (p0) ->
@@ -96,11 +92,52 @@ do ->
 				p.scale(p.scale() * scale_factor)
 					.translate(v * scale_factor for v in p.translate())
 
+	# Load/merge config file(s)
+	[path, fs, yaml] = ['path', 'fs', 'js-yaml'].map(require)
+	path_home = process.env[(
+		if process.platform == 'win32'
+		then 'USERPROFILE' else 'HOME' )]
+
+	conf_merge = (conf, ext) ->
+		for own k, v of ext
+			if k of conf
+				if Array.isArray(conf[k]) and Array.isArray(v)
+					v = d3.merge([conf[k], v])
+				else if typeof(conf[k]) == 'object' and typeof(v) == 'object'
+					v = conf_merge(conf[k], v)
+			conf[k] = v
+		return conf
+
+	path_conf = opts.config_path_base
+	while path_conf
+		if path_conf.match(/^~\//)
+			assert(path_home, 'Unable to get user home path from env')
+			path_conf = path.join(path_home, path_conf.substr(2))
+		path_conf = path.resolve(path_conf)
+		try path_conf = fs.realpathSync(path_conf)
+		catch
+			break
+		if path_conf in opts.config_path then break
+		opts.config_path.push(path_conf)
+		try
+			opts.config = yaml.safeLoad fs.readFileSync(path_conf, encoding: 'utf-8'),
+				filename: path_conf
+				strict: true
+				schema: yaml.CORE_SCHEMA
+		catch err
+			util.error("Failed to process configuration file: #{path_conf}\n  #{err}")
+			process.exit(1)
+		if process.env['PSC_CONF']
+			opts.config.extension = process.env['PSC_CONF']
+			process.env['PSC_CONF'] = null
+		path_conf = opts.config.extension or null
+		delete opts.config.extension
+
 
 ## Projection
 
 proj =
-	name: opts.defaults.projection
+	name: opts.config.projection.name
 	func: null
 	path: null
 
@@ -148,7 +185,6 @@ svg.insert('path', '.graticule')
 
 proj.traces = svg.append('g')
 	.attr('id', 'traces')
-
 proj.markers = svg.append('g')
 	.attr('id', 'markers')
 
@@ -425,9 +461,8 @@ do ->
 			.on 'conn_del', (conn) ->
 				tracer.conn_del(conn.remote.addr)
 
-	# XXX: such straight lines are incorrect in pretty much any projection, fix that
 	trace_path = d3.geo.path().projection(proj.func)
-	source = opts.defaults.source
+	source = opts.config.projection.source
 
 	draw_traces = (traces) ->
 		data = ( {ip: ip, trace: trace}\
@@ -448,10 +483,10 @@ do ->
 						line)
 			.attr('class', 'trace')
 			.attr('d', trace_path)
-
 		traces.exit().remove()
 
-		marker_traces = proj.markers.selectAll('g').data(data, (d) -> d.ip)
+		marker_traces = proj.markers.selectAll('g')
+			.data(data, (d) -> d.ip)
 		marker_traces.enter().append('g')
 		marker_traces.exit().remove()
 
@@ -470,7 +505,7 @@ do ->
 	# setTimeout((-> util.debug(JSON.stringify(tracer.conn.active))), 3000)
 	# setTimeout((-> draw_traces(tracer.conn.active)), 3000)
 
-	ct.start(opts.defaults.conntrack_poll_interval)
+	ct.start(opts.config.updates.conntrack_poll)
 	setInterval(
 		(-> draw_traces(tracer.conn.active)),
-		opts.defaults.draw_interval * 1000 )
+		opts.config.updates.redraw * 1000 )
