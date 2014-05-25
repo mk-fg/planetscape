@@ -94,7 +94,6 @@ proj =
 	traces: null
 	markers: null
 
-# XXX: these always go together - make proj.func/path reactive
 proj.func = opts.projections[proj.name]()
 	.translate([opts.w / 2, opts.h / 2])
 proj.path = d3.geo.path().projection(proj.func)
@@ -238,8 +237,27 @@ do ->
 			json = fs.readFileSync(opts.config.debug.traces.load_from)
 			tracer.conn.active = JSON.parse(json)
 
-	u.add_task_now opts.config.updates.redraw, ->
-		traces = tracer.conn.active
-		if opts.config.debug.traces.dump
-			util.debug(JSON.stringify(traces))
-		draw_traces(traces)
+	do ->
+		redraw =
+			timer: null
+			last_ts: 0
+			last_change_id: null
+			delay_min: 0.2 # used when updates are sparse
+
+		tracer.on 'conn_change', ->
+			if redraw.timer then return
+			ts = (new Date()).getTime()
+			delay = if ts - redraw.last_ts > opts.config.updates.redraw * 1.5\
+				then redraw.delay_min else opts.config.updates.redraw
+
+			u.schedule delay, ->
+				[redraw.timer, redraw.last_ts] = [null, ts]
+				change_id = tracer.conn.active_change_id
+				if redraw.last_change_id != change_id
+					traces = tracer.conn.active
+					if opts.config.debug.traces.dump
+						util.debug(JSON.stringify(traces))
+					draw_traces(traces)
+					redraw.last_change_id = change_id
+
+		draw_traces(tracer.conn.active)

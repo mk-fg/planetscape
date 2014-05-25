@@ -359,14 +359,37 @@
         return tracer.conn.active = JSON.parse(json);
       })();
     }
-    return u.add_task_now(opts.config.updates.redraw, function() {
-      var traces;
-      traces = tracer.conn.active;
-      if (opts.config.debug.traces.dump) {
-        util.debug(JSON.stringify(traces));
-      }
-      return draw_traces(traces);
-    });
+    return (function() {
+      var redraw;
+      redraw = {
+        timer: null,
+        last_ts: 0,
+        last_change_id: null,
+        delay_min: 0.2
+      };
+      tracer.on('conn_change', function() {
+        var delay, ts;
+        if (redraw.timer) {
+          return;
+        }
+        ts = (new Date()).getTime();
+        delay = ts - redraw.last_ts > opts.config.updates.redraw * 1.5 ? redraw.delay_min : opts.config.updates.redraw;
+        return u.schedule(delay, function() {
+          var change_id, traces, _ref;
+          _ref = [null, ts], redraw.timer = _ref[0], redraw.last_ts = _ref[1];
+          change_id = tracer.conn.active_change_id;
+          if (redraw.last_change_id !== change_id) {
+            traces = tracer.conn.active;
+            if (opts.config.debug.traces.dump) {
+              util.debug(JSON.stringify(traces));
+            }
+            draw_traces(traces);
+            return redraw.last_change_id = change_id;
+          }
+        });
+      });
+      return draw_traces(tracer.conn.active);
+    })();
   })();
 
 }).call(this);

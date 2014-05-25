@@ -104,15 +104,20 @@ class Tracer extends events.EventEmitter
 
 		@conn =
 			active: {}
+			active_change_id: 0
 			pending: {}
 			cache: new Cache()
 
 		this
+			.on 'conn_change', ->
+				@conn.active_change_id += 1
+
 			.on 'trace', (ip, hops) ->
 				if not @conn.pending[ip] then return
 				@conn.active[ip] = hops
 				@conn.cache.set(ip, hops)
 				delete @conn.pending[ip]
+				@emit('conn_change')
 
 			.on 'conn_add', (ip) ->
 				if @conn.active[ip] or @conn.pending[ip] then return
@@ -127,11 +132,12 @@ class Tracer extends events.EventEmitter
 				if not @conn.active[ip] then return
 				delete @conn.active[ip]
 				delete @conn.pending[ip]
+				@emit('conn_change')
 
 			.on 'conn_list', (ip_list) ->
 				active = {}
 				for own ip, hops of @conn.active
-					active[k] = v
+					active[ip] = hops
 				for ip in ip_list
 					if active[ip]
 						delete active[ip]

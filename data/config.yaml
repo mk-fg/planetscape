@@ -20,7 +20,6 @@ projection:
 updates:
   conntrack_poll: 5 # sec between polling connection table
   redraw: 3 # sec between updating map with new traces (if any)
-  # XXX: replace "redraw" with reactive logic, with some lock vs concurrency
   # XXX: maybe some rate-limiting for traceroute stuff
 
 debug:

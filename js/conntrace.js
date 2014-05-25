@@ -172,16 +172,20 @@
       Tracer.__super__.constructor.call(this);
       this.conn = {
         active: {},
+        active_change_id: 0,
         pending: {},
         cache: new Cache()
       };
-      this.on('trace', function(ip, hops) {
+      this.on('conn_change', function() {
+        return this.conn.active_change_id += 1;
+      }).on('trace', function(ip, hops) {
         if (!this.conn.pending[ip]) {
           return;
         }
         this.conn.active[ip] = hops;
         this.conn.cache.set(ip, hops);
-        return delete this.conn.pending[ip];
+        delete this.conn.pending[ip];
+        return this.emit('conn_change');
       }).on('conn_add', function(ip) {
         var hops;
         if (this.conn.active[ip] || this.conn.pending[ip]) {
@@ -199,7 +203,8 @@
           return;
         }
         delete this.conn.active[ip];
-        return delete this.conn.pending[ip];
+        delete this.conn.pending[ip];
+        return this.emit('conn_change');
       }).on('conn_list', function(ip_list) {
         var active, hops, ip, _i, _len, _ref, _results;
         active = {};
@@ -207,7 +212,7 @@
         for (ip in _ref) {
           if (!__hasProp.call(_ref, ip)) continue;
           hops = _ref[ip];
-          active[k] = v;
+          active[ip] = hops;
         }
         for (_i = 0, _len = ip_list.length; _i < _len; _i++) {
           ip = ip_list[_i];

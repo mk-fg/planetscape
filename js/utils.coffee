@@ -20,11 +20,14 @@ dump = (data, label='unlabeled object', opts={}) ->
 	util.debug("#{label}\n" + util.inspect(data, opts))
 
 
-# setInterval interface is beyond atrocious
+# setInterval/setTimeout interface is beyond atrocious
+
 add_task = (interval, cb) -> setInterval(cb, interval*1000)
 add_task_now = (interval, cb) ->
 	cb()
 	return add_task(interval, cb)
+
+schedule = (delay, cb) -> setTimeout(cb, delay*1000)
 
 
 deep_freeze = (layer) ->
@@ -43,4 +46,5 @@ module.exports.assert = assert
 module.exports.dump = dump
 module.exports.add_task = add_task
 module.exports.add_task_now = add_task_now
+module.exports.schedule = schedule
 module.exports.deep_freeze = deep_freeze
