@@ -106,6 +106,9 @@ svg = d3.select('svg')
 		'margin-left': '-' + (opts.w / 2) + 'px'
 		'margin-top': '-' + (opts.h / 2) + 'px' )
 
+# XXX: group for bg
+# proj.bg = svg.append('g')
+# 	.attr('id', 'bg')
 svg.append('defs').append('path')
 	.datum(type: 'Sphere')
 	.attr('id', 'sphere')
@@ -192,8 +195,19 @@ do ->
 			.on 'conn_del', (conn) ->
 				tracer.conn_del(conn.remote.addr)
 
-	trace_path = d3.geo.path().projection(proj.func)
-	source = opts.conf.projection.source
+	draw_helpers =
+		fade_in: (selection) ->
+			selection
+				.style('opacity', 1e-6)
+				.transition()
+					.duration(opts.conf.style.traces.fade_time * 1000)
+					.style('opacity', 1.0)
+		fade_out: (selection) ->
+			selection
+				.transition()
+					.duration(opts.conf.style.traces.fade_time * 1000)
+					.style('opacity', 1e-6)
+					.remove()
 
 	draw_traces = (traces) ->
 		data = ( {ip: ip, trace: trace}\
@@ -202,33 +216,38 @@ do ->
 
 		traces = proj.traces.selectAll('path.trace')
 			.data(data, (d) -> d.ip)
-		traces.enter().append('path')
-			.datum((d) ->
-				type: 'MultiLineString'
-				coordinates: do ->
-					p0 = source[..].reverse()
-					for node in d.trace
-						u.assert(node.geo, [node, d.trace])
-						p1 = node.geo[..].reverse()
-						[p0, line] = [p1, [p0, p1]]
-						line)
-			.attr('class', 'trace')
-			.attr('d', trace_path)
-		traces.exit().remove()
+		draw_helpers.fade_in \
+			traces.enter().append('path')\
+				.datum((d) ->
+					type: 'MultiLineString'
+					coordinates: do ->
+						p0 = opts.conf.projection.source[..].reverse()
+						for node in d.trace
+							u.assert(node.geo, [node, d.trace])
+							p1 = node.geo[..].reverse()
+							[p0, line] = [p1, [p0, p1]]
+							line)
+				.attr('class', 'trace')
+				.attr('d', d3.geo.path().projection(proj.func))
+		draw_helpers.fade_out \
+			traces.exit()
 
 		marker_traces = proj.markers.selectAll('g')
 			.data(data, (d) -> d.ip)
 		marker_traces.enter().append('g')
 		marker_traces.exit().remove()
 
+		# XXX: marker -> expanding yellowish spot with a gradient
 		markers = marker_traces.selectAll('circle').data((d) -> d.trace)
-		markers.enter().append('circle')
-			.datum((d) -> proj.func(d.geo[..].reverse()))
-			.attr('class','point')
-			.attr('cx', (d) -> d[0])
-			.attr('cy', (d) -> d[1])
-			.attr('r', 2)
-		markers.exit().remove()
+		draw_helpers.fade_in \
+			markers.enter().append('circle')\
+				.datum((d) -> proj.func(d.geo[..].reverse()))
+				.attr('class','point')
+				.attr('cx', (d) -> d[0])
+				.attr('cy', (d) -> d[1])
+				.attr('r', 2)
+		draw_helpers.fade_out \
+			markers.exit()
 
 	if not opts.conf.debug.traces.load_from
 		ct.start(opts.conf.updates.conntrack_poll)

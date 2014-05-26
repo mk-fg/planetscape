@@ -22,6 +22,10 @@ updates:
   redraw: 3 # sec between updating map with new traces (if any)
   # XXX: maybe some rate-limiting for traceroute stuff
 
+style:
+  traces:
+    fade_time: 2.0 # sec to fade-in/fade-out
+
 debug:
   traces:
     # Dump json of trace geo data to stdout on each redraw routine

@@ -266,7 +266,7 @@
   })();
 
   (function() {
-    var ct, draw_traces, source, trace_path, tracer;
+    var ct, draw_helpers, draw_traces, tracer;
     tracer = conntrace.Tracer.in_domain();
     ct = conntrace.ConntrackSS.in_domain();
     if (ct.polling) {
@@ -289,8 +289,14 @@
         return tracer.conn_del(conn.remote.addr);
       });
     }
-    trace_path = d3.geo.path().projection(proj.func);
-    source = opts.conf.projection.source;
+    draw_helpers = {
+      fade_in: function(selection) {
+        return selection.style('opacity', 1e-6).transition().duration(opts.conf.style.traces.fade_time * 1000).style('opacity', 1.0);
+      },
+      fade_out: function(selection) {
+        return selection.transition().duration(opts.conf.style.traces.fade_time * 1000).style('opacity', 1e-6).remove();
+      }
+    };
     draw_traces = function(traces) {
       var data, ip, marker_traces, markers, trace;
       data = (function() {
@@ -313,12 +319,12 @@
       traces = proj.traces.selectAll('path.trace').data(data, function(d) {
         return d.ip;
       });
-      traces.enter().append('path').datum(function(d) {
+      draw_helpers.fade_in(traces.enter().append('path').datum(function(d) {
         return {
           type: 'MultiLineString',
           coordinates: (function() {
             var line, node, p0, p1, _i, _len, _ref, _ref1, _results;
-            p0 = source.slice(0).reverse();
+            p0 = opts.conf.projection.source.slice(0).reverse();
             _ref = d.trace;
             _results = [];
             for (_i = 0, _len = _ref.length; _i < _len; _i++) {
@@ -331,8 +337,8 @@
             return _results;
           })()
         };
-      }).attr('class', 'trace').attr('d', trace_path);
-      traces.exit().remove();
+      })).attr('class', 'trace').attr('d', d3.geo.path().projection(proj.func));
+      draw_helpers.fade_out(traces.exit());
       marker_traces = proj.markers.selectAll('g').data(data, function(d) {
         return d.ip;
       });
@@ -341,14 +347,14 @@
       markers = marker_traces.selectAll('circle').data(function(d) {
         return d.trace;
       });
-      markers.enter().append('circle').datum(function(d) {
+      draw_helpers.fade_in(markers.enter().append('circle').datum(function(d) {
         return proj.func(d.geo.slice(0).reverse());
-      }).attr('class', 'point').attr('cx', function(d) {
+      })).attr('class', 'point').attr('cx', function(d) {
         return d[0];
       }).attr('cy', function(d) {
         return d[1];
       }).attr('r', 2);
-      return markers.exit().remove();
+      return draw_helpers.fade_out(markers.exit());
     };
     if (!opts.conf.debug.traces.load_from) {
       ct.start(opts.conf.updates.conntrack_poll);
