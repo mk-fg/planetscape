@@ -68,26 +68,26 @@ opts =
 	w: window.innerWidth * 0.9
 	h: window.innerHeight * 0.9
 
-	config_path_base: './data/config.yaml'
-	config: null
+	conf_path_base: './data/config.yaml'
+	conf: null
 
 do ->
 	# Scaling factors are straight from http://bl.ocks.org/mbostock/3711652
-	scale_factor = Math.min(opts.w / 960, opts.h / 500)
+	scale_factor = Math.min(opts.w / 960, opts.h / 500) # XXX: hard-coded values
 	for k, p0 of opts.projections
 		do (p0) ->
 			opts.projections[k] = ->
 				p = p0().rotate([0, 0, 0]).center([0, 0])
 				p.scale(p.scale() * scale_factor)
 					.translate(v * scale_factor for v in p.translate())
-	opts.config = config.load_conf(opts.config_path_base, process.env['PSC_CONF'])
+	opts.conf = config.load_conf(opts.conf_path_base, process.env['PSC_CONF'])
 	u.deep_freeze(opts)
 
 
 ## Projection
 
 proj =
-	name: opts.config.projection.name
+	name: opts.conf.projection.name
 	func: null
 	path: null
 
@@ -193,7 +193,7 @@ do ->
 				tracer.conn_del(conn.remote.addr)
 
 	trace_path = d3.geo.path().projection(proj.func)
-	source = opts.config.projection.source
+	source = opts.conf.projection.source
 
 	draw_traces = (traces) ->
 		data = ( {ip: ip, trace: trace}\
@@ -230,11 +230,11 @@ do ->
 			.attr('r', 2)
 		markers.exit().remove()
 
-	if not opts.config.debug.traces.load_from
-		ct.start(opts.config.updates.conntrack_poll)
+	if not opts.conf.debug.traces.load_from
+		ct.start(opts.conf.updates.conntrack_poll)
 	else
 		do ->
-			json = fs.readFileSync(opts.config.debug.traces.load_from)
+			json = fs.readFileSync(opts.conf.debug.traces.load_from)
 			tracer.conn.active = JSON.parse(json)
 
 	do ->
@@ -247,15 +247,15 @@ do ->
 		tracer.on 'conn_change', ->
 			if redraw.timer then return
 			ts = (new Date()).getTime()
-			delay = if ts - redraw.last_ts > opts.config.updates.redraw * 1.5\
-				then redraw.delay_min else opts.config.updates.redraw
+			delay = if ts - redraw.last_ts > opts.conf.updates.redraw * 1.5\
+				then redraw.delay_min else opts.conf.updates.redraw
 
 			u.schedule delay, ->
 				[redraw.timer, redraw.last_ts] = [null, ts]
 				change_id = tracer.conn.active_change_id
 				if redraw.last_change_id != change_id
 					traces = tracer.conn.active
-					if opts.config.debug.traces.dump
+					if opts.conf.debug.traces.dump
 						util.debug(JSON.stringify(traces))
 					draw_traces(traces)
 					redraw.last_change_id = change_id

@@ -149,8 +149,8 @@
     world: require('./data/world-110m.json'),
     w: window.innerWidth * 0.9,
     h: window.innerHeight * 0.9,
-    config_path_base: './data/config.yaml',
-    config: null
+    conf_path_base: './data/config.yaml',
+    conf: null
   };
 
   (function() {
@@ -177,12 +177,12 @@
       p0 = _ref[k];
       _fn(p0);
     }
-    opts.config = config.load_conf(opts.config_path_base, process.env['PSC_CONF']);
+    opts.conf = config.load_conf(opts.conf_path_base, process.env['PSC_CONF']);
     return u.deep_freeze(opts);
   })();
 
   proj = {
-    name: opts.config.projection.name,
+    name: opts.conf.projection.name,
     func: null,
     path: null,
     traces: null,
@@ -290,7 +290,7 @@
       });
     }
     trace_path = d3.geo.path().projection(proj.func);
-    source = opts.config.projection.source;
+    source = opts.conf.projection.source;
     draw_traces = function(traces) {
       var data, ip, marker_traces, markers, trace;
       data = (function() {
@@ -350,12 +350,12 @@
       }).attr('r', 2);
       return markers.exit().remove();
     };
-    if (!opts.config.debug.traces.load_from) {
-      ct.start(opts.config.updates.conntrack_poll);
+    if (!opts.conf.debug.traces.load_from) {
+      ct.start(opts.conf.updates.conntrack_poll);
     } else {
       (function() {
         var json;
-        json = fs.readFileSync(opts.config.debug.traces.load_from);
+        json = fs.readFileSync(opts.conf.debug.traces.load_from);
         return tracer.conn.active = JSON.parse(json);
       })();
     }
@@ -373,14 +373,14 @@
           return;
         }
         ts = (new Date()).getTime();
-        delay = ts - redraw.last_ts > opts.config.updates.redraw * 1.5 ? redraw.delay_min : opts.config.updates.redraw;
+        delay = ts - redraw.last_ts > opts.conf.updates.redraw * 1.5 ? redraw.delay_min : opts.conf.updates.redraw;
         return u.schedule(delay, function() {
           var change_id, traces, _ref;
           _ref = [null, ts], redraw.timer = _ref[0], redraw.last_ts = _ref[1];
           change_id = tracer.conn.active_change_id;
           if (redraw.last_change_id !== change_id) {
             traces = tracer.conn.active;
-            if (opts.config.debug.traces.dump) {
+            if (opts.conf.debug.traces.dump) {
               util.debug(JSON.stringify(traces));
             }
             draw_traces(traces);
