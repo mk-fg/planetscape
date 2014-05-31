@@ -9,6 +9,26 @@ A project of mine from a few years ago, imported from
 
 In process of being converted from python + xplanet thing to a node-webkit app.
 
+Current idea is to create niceish js desktop, basically:
+
+* Have kinda-heatmap of network connections there, so that paths most travelled
+	will glow persistently.
+
+* API thru which conntrack data can be piped into the app, so that lists of
+	connections can be grabbed elsewhere (e.g. random remote server(s)),
+	and it's kinda required anyway as both proper event-based conntrack data
+	(via netlink on leenooks) and traceroutes (raw sockets) require privileged
+	component (i.e. need root euid or NET_ADMIN cap) - running node-webkit as root
+	is just bananas.
+
+	Currently this stuff is just done via two api's of system cli binaries - "mtr"
+	(for traceroute) and "ss" (connections - it's a netstat thing from iproute2).
+
+* Have all that as just one plugin, have more plugins for misc other geo-data \o/
+
+"desktop" itself in this case will be an app running in a root X window and
+composited as a background by your favorite wm.
+
 
 Links
 --------------------
