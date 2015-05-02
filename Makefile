@@ -26,12 +26,12 @@ jade: $(HTML_FILES)
 
 
 node_modules/.keep: package.yaml
-	python -c "import yaml; print '\n'.join(yaml.load(open('$<'))['dependencies'].keys())" |\
+	python -c "import yaml; print '\n'.join(yaml.safe_load(open('$<'))['dependencies'].keys())" |\
 		while read n; do [ -d "node_modules/$$n" ] || npm install "$$n"; done
 	touch node_modules/.keep
 
 package.json: package.yaml
-	python -c "import yaml, json; json.dump(yaml.load(open('$<')), open('$@', 'wb'))"
+	python -c "import yaml, json; json.dump(yaml.safe_load(open('$<')), open('$@', 'wb'))"
 
 
 .PHONY: coffee sass jade

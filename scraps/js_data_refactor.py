@@ -55,7 +55,7 @@ data = re.sub(r'(?<=projection: )(d3\..*)(?=\})', r"'\1'", data)
 
 import yaml, operator as op
 
-data = yaml.load(data)
+data = yaml.safe_load(data)
 data = sorted(data, key=op.itemgetter('name'))
 
 data_tuple = op.itemgetter('name', 'projection')
